@@ -45,6 +45,7 @@ python3 -m py_compile scripts/lib/*.py
 ./tests/nemo-entrypoint-smoke
 ./tests/transcribe-smoke
 ./tests/benchmark-smoke
+./tests/benchmark-runner-smoke
 ./tests/paths-evaluation-smoke
 ./tests/foundation-unit
 

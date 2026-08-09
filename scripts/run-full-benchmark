@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_path=$(realpath -- "${BASH_SOURCE[0]}")
+script_dir=$(dirname -- "$script_path")
+source "$script_dir/lib/paths.sh"
+source "$script_dir/lib/benchmark_runner.sh"
+
+if (($#)); then
+  printf 'usage: scripts/run-full-benchmark\n' >&2
+  exit 2
+fi
+
+expected_revision=${NATIVE_ASR_EXPECTED_REVISION:-$(git -C "$NATIVE_ASR_REPO_ROOT" rev-parse HEAD)}
+benchmark_runner_inhibit_sleep "$script_path"
+benchmark_runner_lock
+
+failed() {
+  local status=$?
+  printf '%s\texit=%s\tline=%s\tcommand=%s\n' \
+    "$(date --iso-8601=seconds)" "$status" "${BASH_LINENO[0]:-unknown}" \
+    "${BASH_COMMAND:-unknown}" > "$BENCHMARK_RUN_ROOT/failed.tsv"
+  benchmark_runner_phase failed
+  exit "$status"
+}
+trap failed ERR
+
+rm -f "$BENCHMARK_RUN_ROOT/failed.tsv" "$BENCHMARK_RUN_ROOT/completed.tsv"
+cd "$NATIVE_ASR_REPO_ROOT"
+
+benchmark_runner_phase preflight
+benchmark_runner_preflight "$expected_revision"
+./scripts/verify-models
+just verify-datasets
+
+benchmark_runner_phase smoke
+just bench-suite smoke
+
+models=(
+  sherpa:parakeet-unified-en
+  sherpa:canary-180m-flash
+  sherpa:nemotron-streaming-en
+  nemo:parakeet-tdt-v3
+  nemo:nemotron-streaming-en
+  nemo:nemotron-3.5-streaming
+  nemo:parakeet-ctc-1.1b
+  moonshine:small-streaming-en
+  whisper:small.en
+)
+splits=(librispeech-test-clean librispeech-test-other)
+
+benchmark_runner_phase subset-accuracy
+for split in "${splits[@]}"; do
+  for model in "${models[@]}"; do
+    ./scripts/benchmark-set --limit 100 "$model" "$split"
+  done
+done
+
+benchmark_runner_phase subset-validation
+jq -e -s '
+  [.[]
+   | select(.benchmark_kind != "streaming" and .options.limit == 100)]
+  | sort_by(.dataset, .model_alias, .created_at)
+  | group_by(.dataset, .model_alias)
+  | map(last)
+  | length == 18 and
+    all(.[];
+      .status == "complete" and
+      .failures == 0 and
+      .wer != null and
+      .rtf != null and
+      .peak_rss_kb != null and
+      .dirty_tree == false)
+' "$NATIVE_ASR_BENCHMARKS" >/dev/null
+
+finalists=(
+  sherpa:parakeet-unified-en
+  nemo:parakeet-tdt-v3
+  moonshine:small-streaming-en
+  whisper:small.en
+)
+
+benchmark_runner_phase full-accuracy
+for split in "${splits[@]}"; do
+  for model in "${finalists[@]}"; do
+    ./scripts/benchmark-set "$model" "$split"
+  done
+done
+
+benchmark_runner_phase full-validation
+jq -e -s '
+  [.[]
+   | select(.benchmark_kind != "streaming" and .options.limit == null)]
+  | sort_by(.dataset, .model_alias, .created_at)
+  | group_by(.dataset, .model_alias)
+  | map(last)
+  | length == 8 and
+    all(.[];
+      .status == "complete" and
+      .failures == 0 and
+      .wer != null and
+      .rtf != null and
+      .peak_rss_kb != null and
+      .dirty_tree == false)
+' "$NATIVE_ASR_BENCHMARKS" >/dev/null
+
+benchmark_runner_phase streaming
+just bench-suite streaming
+
+benchmark_runner_phase streaming-validation
+mapfile -d '' stream_summaries < <(
+  find "$BENCHMARK_RUN_ROOT/streams" -name '*.summary.json' -type f -print0 | sort -z
+)
+test "${#stream_summaries[@]}" -ge 8
+jq -e -s '
+  sort_by(.model_alias, .options.pace, .created_at)
+  | group_by(.model_alias, .options.pace)
+  | map(last)
+  | length == 8 and
+    all(.[];
+      .status == "complete" and
+      .failures == 0 and
+      .events_ordered == true and
+      .peak_rss_kb != null and
+      .dirty_tree == false and
+      (if .options.pace then
+         .wer != null and
+         .finalization_lag_ms != null and
+         (if .model_alias == "moonshine:small-streaming-en" then
+            .partial_events > 0 and .mean_partial_lag_ms != null
+          else
+            .partial_events == 0
+          end)
+       else
+         .wer == null and .long_form_overlap_wer_reported == false
+       end))
+' "${stream_summaries[@]}" >/dev/null
+
+benchmark_runner_phase staged-resume-audit
+just bench-suite staged
+
+benchmark_runner_phase complete
+date --iso-8601=seconds > "$BENCHMARK_RUN_ROOT/completed.tsv"

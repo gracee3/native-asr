@@ -230,6 +230,20 @@ just benchmark-set whisper:small.en librispeech-test-clean
 just bench-suite staged
 ```
 
+After `just prepare-datasets`, run the complete reviewed matrix with
+clean-tree, stable-power, locking, phase, and result validation gates:
+
+```bash
+just bench-full
+```
+
+The runner honors all `NATIVE_ASR_*` storage overrides and automatically uses
+`systemd-inhibit`, when available, to block sleep for the duration. Set
+`NATIVE_ASR_INHIBIT_SLEEP=0` to opt out or `NATIVE_ASR_SKIP_POWER_CHECK=1` when
+AC/performance-profile detection is unavailable. `just bench-test-clean-pair`
+replays only the two full `test-clean` finalist cells used by the original
+targeted recovery run.
+
 The staged suite evaluates deterministic 100-utterance subsets, the four fixed
 finalists on full LibriSpeech splits, a reproducible five-minute paced stream,
 and the full AMI meeting. AMI is not assigned a misleading overlap-sensitive

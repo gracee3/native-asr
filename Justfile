@@ -86,6 +86,14 @@ benchmark-set alias dataset:
 bench-suite suite:
     @./scripts/benchmark-suite {{ quote(suite) }}
 
+# Run the reviewed sequential benchmark matrix with locking and validation.
+bench-full:
+    @./scripts/run-full-benchmark
+
+# Run the two full test-clean finalist cells used for targeted recovery.
+bench-test-clean-pair:
+    @./scripts/run-test-clean-pair
+
 stream alias audio:
     @./scripts/stream {{ quote(alias) }} {{ quote(audio) }}
 

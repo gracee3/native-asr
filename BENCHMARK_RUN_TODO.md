@@ -13,6 +13,8 @@ passed with zero failures and are published in
 `docs/reproducibility-report.md`. The full phase was stopped before its first
 summary record to review the public README and license. Resume at section 5;
 the exact staged command will reuse the successful subset fingerprints.
+The portable versions of the operational runners are now available as
+`just bench-full` and `just bench-test-clean-pair`.
 
 ## Ground rules
 
@@ -22,8 +24,10 @@ the exact staged command will reuse the successful subset fingerprints.
 - Keep the machine on AC power and avoid other sustained CPU loads. Note any
   thermal throttling, power-profile changes, or interruption in the final
   report.
-- Do not commit models, corpora, prepared audio, detail JSONL, or raw benchmark
+- Do not commit models, corpora, prepared audio, or unreviewed benchmark
   output. They belong in the external paths and are already ignored by Git.
+  Only deliberately reviewed snapshots derived from public evaluation corpora
+  may be published under `benchmarks/published`.
 - A failed run is never resumable. A completed run is reused only when every
   fingerprint input matches. Rerunning the same command after interruption is
   safe.

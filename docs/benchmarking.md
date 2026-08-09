@@ -48,6 +48,15 @@ container startup, and FFprobe supplies source duration. The script appends one
 compact record under an exclusive `flock`, including failed runs and their exit
 status. The default destination is `/data/benchmarks/native-asr/runs.jsonl`.
 
+`scripts/run-full-benchmark` is the durable public runner for the reviewed
+matrix. It executes the nine-alias smoke and subset gates, the eight full-split
+finalist cells, the streaming matrix, validation after each phase, and a final
+resume audit. It holds an exclusive ledger lock and requests a system sleep
+inhibitor while active. `scripts/run-test-clean-pair` provides the narrower
+two-model recovery run used during the original benchmark campaign. Both use
+the shared external-path defaults and accept the documented `NATIVE_ASR_*`
+overrides.
+
 ## Public evaluation sets
 
 `scripts/datasets` locks, fetches, verifies, and prepares LibriSpeech

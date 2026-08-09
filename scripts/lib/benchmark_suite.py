@@ -100,7 +100,18 @@ def run(command: list[str], output: Path | None = None) -> Path | None:
 
 
 def smoke() -> None:
-    sample = ROOT / "samples/hf-sample1.flac"
+    manifest = DATASETS / "manifests/librispeech-test-clean.jsonl"
+    if not manifest.is_file():
+        raise RuntimeError(
+            f"prepared test-clean manifest is missing: {manifest}; run just prepare-datasets"
+        )
+    first = next((json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
+                  if line), None)
+    if first is None:
+        raise RuntimeError(f"prepared test-clean manifest is empty: {manifest}")
+    sample = Path(first["prepared_path"])
+    if not sample.is_file():
+        raise RuntimeError(f"prepared smoke input is missing: {sample}; run just prepare-datasets")
     for alias in ALIASES:
         run([str(ROOT / "scripts/transcribe"), "--format", "json", alias, str(sample)])
 

@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_path=$(realpath -- "${BASH_SOURCE[0]}")
+script_dir=$(dirname -- "$script_path")
+source "$script_dir/lib/paths.sh"
+source "$script_dir/lib/benchmark_runner.sh"
+
+if (($#)); then
+  printf 'usage: scripts/run-test-clean-pair\n' >&2
+  exit 2
+fi
+
+expected_revision=${NATIVE_ASR_EXPECTED_REVISION:-$(git -C "$NATIVE_ASR_REPO_ROOT" rev-parse HEAD)}
+benchmark_runner_inhibit_sleep "$script_path"
+benchmark_runner_lock
+
+failed() {
+  local status=$?
+  printf '%s\texit=%s\tline=%s\tcommand=%s\n' \
+    "$(date --iso-8601=seconds)" "$status" "${BASH_LINENO[0]:-unknown}" \
+    "${BASH_COMMAND:-unknown}" > "$BENCHMARK_RUN_ROOT/pair-failed.tsv"
+  benchmark_runner_phase pair-failed
+  exit "$status"
+}
+trap failed ERR
+
+validate_cell() {
+  local alias=$1
+  jq -e -s --arg alias "$alias" '
+    ([.[]
+      | select(.benchmark_kind != "streaming" and
+               .dataset == "librispeech-test-clean" and
+               .model_alias == $alias and
+               .options.limit == null)]
+     | sort_by(.created_at) | last) as $row
+    | $row != null and
+      $row.dirty_tree == false and
+      $row.status == "complete" and
+      $row.utterances == 2620 and
+      $row.failures == 0 and
+      $row.wer != null and
+      $row.rtf != null and
+      $row.peak_rss_kb != null
+  ' "$NATIVE_ASR_BENCHMARKS" >/dev/null
+}
+
+rm -f "$BENCHMARK_RUN_ROOT/pair-failed.tsv" "$BENCHMARK_RUN_ROOT/pair-completed.tsv"
+cd "$NATIVE_ASR_REPO_ROOT"
+
+benchmark_runner_phase pair-preflight
+benchmark_runner_preflight "$expected_revision"
+
+benchmark_runner_phase pair-sherpa-parakeet-test-clean
+./scripts/benchmark-set sherpa:parakeet-unified-en librispeech-test-clean
+validate_cell sherpa:parakeet-unified-en
+
+benchmark_runner_phase pair-nemo-tdt-test-clean
+./scripts/benchmark-set nemo:parakeet-tdt-v3 librispeech-test-clean
+validate_cell nemo:parakeet-tdt-v3
+
+benchmark_runner_phase pair-complete
+date --iso-8601=seconds > "$BENCHMARK_RUN_ROOT/pair-completed.tsv"

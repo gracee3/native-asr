@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-runner-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+export NATIVE_ASR_BENCHMARKS="$work/benchmarks/runs.jsonl"
+export NATIVE_ASR_INHIBIT_SLEEP=0
+export NATIVE_ASR_SKIP_POWER_CHECK=1
+source "$repo_root/scripts/lib/benchmark_runner.sh"
+
+benchmark_runner_inhibit_sleep "$repo_root/scripts/run-full-benchmark"
+benchmark_runner_lock
+[[ $BENCHMARK_RUN_ROOT == "$work/benchmarks" ]]
+benchmark_runner_phase smoke-test >/dev/null
+grep -Fq $'\tsmoke-test' "$BENCHMARK_RUN_ROOT/phase.tsv"
+benchmark_runner_check_power 2>"$work/power-warning"
+grep -Fq 'power checks were explicitly disabled' "$work/power-warning"
+
+if bash -c 'set -euo pipefail; source "$1"; benchmark_runner_lock' \
+    bash "$repo_root/scripts/lib/benchmark_runner.sh" 2>"$work/lock-error"; then
+  printf '%s\n' 'error: a second benchmark runner acquired the same lock' >&2
+  exit 1
+fi
+grep -Fq 'another native-asr benchmark runner' "$work/lock-error"
+
+set +e
+full_usage=$("$repo_root/scripts/run-full-benchmark" unexpected 2>&1)
+full_status=$?
+pair_usage=$("$repo_root/scripts/run-test-clean-pair" unexpected 2>&1)
+pair_status=$?
+set -e
+[[ $full_status == 2 && $full_usage == 'usage: scripts/run-full-benchmark' ]]
+[[ $pair_status == 2 && $pair_usage == 'usage: scripts/run-test-clean-pair' ]]
+
+printf '%s\n' 'benchmark runner smoke: ok'
