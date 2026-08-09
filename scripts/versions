@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+value() {
+  local file=$1 key=$2
+  sed -n "s/^ARG ${key}=//p" "$file" | tail -n 1
+}
+
+sherpa=$repo_root/docker/sherpa-onnx/Dockerfile
+nemo=$repo_root/docker/nemo-speech/Dockerfile
+
+printf '%-18s %-12s %s\n' RUNTIME VERSION REVISION
+printf '%-18s %-12s %s\n' \
+  sherpa-onnx \
+  "$(value "$sherpa" SHERPA_ONNX_VERSION)" \
+  "$(value "$sherpa" SHERPA_ONNX_REVISION)"
+printf '%-18s %-12s %s\n' \
+  onnxruntime \
+  "$(value "$sherpa" ONNXRUNTIME_VERSION)" \
+  bundled-by-sherpa
+printf '%-18s %-12s %s\n' \
+  nemo-speech \
+  "$(value "$nemo" NEMO_SPEECH_VERSION)" \
+  "$(value "$nemo" NEMO_SPEECH_REVISION)"
+printf '%-18s %-12s %s\n' \
+  ggml submodule "$(value "$nemo" GGML_REVISION)"

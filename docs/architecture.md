@@ -38,6 +38,16 @@ ONNX Runtime library. This avoids a verified allocator failure seen with the
 same release's static ONNX Runtime archive while keeping compilers, headers,
 and source trees out of the final stage.
 
+The NeMo-Speech.cpp image builds the pinned ASR CLI and shared library against
+its exact ggml submodule. CUDA, Metal, Vulkan, HTTP, gRPC, NMT, TTS,
+diarization, examples, tests, and tools are disabled. The final stage contains
+the staged native libraries, SentencePiece, FFmpeg, and jq, but no compiler,
+source checkout, Python, PyTorch, or NVIDIA NeMo framework.
+
+NeMo-Speech.cpp 1.0.0 currently passes a literal four threads to ggml ASR graph
+execution. The host and container wrappers enforce and record four until the
+upstream runtime exposes a real ASR thread control.
+
 The default builds target portable modern x86-64 CPUs. They do not use
 `-march=native`. A separately named host-native profile can be added only after
 portable behavior and benchmark comparability are established.
@@ -52,3 +62,12 @@ microphone plumbing is added.
 Benchmark records must distinguish raw runtime behavior from production
 long-form segmentation. Results using different segmentation strategies are not
 presented as direct runtime comparisons without that qualifier.
+
+## Host dispatcher
+
+`scripts/transcribe` resolves a runtime-qualified alias from the model lock,
+verifies it, and invokes the matching image with `--network none`. Only the
+runtime's model subtree and the input file's parent directory are mounted, both
+read-only. Container wrappers create normalized audio under temporary storage
+and emit JSON; the host enriches that JSON with the original absolute audio path
+and immutable artifact provenance.

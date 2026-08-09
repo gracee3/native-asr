@@ -99,6 +99,7 @@ RUN apt-get update \
         libgomp1 \
         libsentencepiece0 \
         libstdc++6 \
+        time \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 65532 native-asr \
     && useradd --system --uid 65532 --gid 65532 \

@@ -42,6 +42,18 @@ model alias:
 verify-models alias="":
     @./scripts/verify-models {{ if alias == "" { "" } else { quote(alias) } }}
 
+# Transcribe one audio file through the runtime selected by its model alias.
+transcribe alias audio:
+    @./scripts/transcribe {{ quote(alias) }} {{ quote(audio) }}
+
+# Benchmark one model/audio pair and append a provenance-rich JSONL record.
+bench alias audio:
+    @./scripts/benchmark {{ quote(alias) }} {{ quote(audio) }}
+
+# Print source versions and revisions pinned by the runtime images.
+versions:
+    @./scripts/versions
+
 # Print the effective host model directory.
 model-dir:
     @./scripts/models path

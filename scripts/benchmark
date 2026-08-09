@@ -1,5 +1,328 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf '%s\n' 'The benchmark runner is not implemented yet.' >&2
-exit 2
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/.." && pwd)
+manifest=${NATIVE_ASR_MODEL_MANIFEST:-$repo_root/manifests/models.lock}
+models_root=${NATIVE_ASR_MODELS:-$repo_root/models}
+container_engine=${NATIVE_ASR_CONTAINER_ENGINE:-docker}
+output_file=${NATIVE_ASR_BENCHMARKS:-$repo_root/benchmarks/runs.jsonl}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 2
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/benchmark [OPTIONS] MODEL_ALIAS AUDIO
+
+Options:
+  --threads N              inference threads (default: runtime-specific)
+  --language CODE          model language code or prompt
+  --vad auto|on|none       sherpa VAD mode (default: auto)
+  --stream auto|on|none    NeMo file streaming mode (default: auto)
+  --output PATH            JSONL destination (default: benchmarks/runs.jsonl)
+
+The timed region includes container startup and in-container audio normalization,
+but excludes model checksum verification and Docker image inspection.
+EOF
+}
+
+record_for_alias() {
+  local wanted=$1
+  awk -F'|' -v wanted="$wanted" '
+    !/^#/ && NF && $2 == wanted { print; found=1; exit }
+    END { if (!found) exit 1 }
+  ' "$manifest"
+}
+
+dockerfile_arg() {
+  local dockerfile=$1 key=$2
+  sed -n "s/^ARG ${key}=//p" "$dockerfile" | tail -n 1
+}
+
+main() {
+  local threads='' language='' vad=auto stream=auto alias='' audio=''
+  while (($#)); do
+    case $1 in
+      --threads)
+        (($# >= 2)) || die '--threads requires a positive integer'
+        threads=$2
+        shift 2
+        ;;
+      --language)
+        (($# >= 2)) || die '--language requires a code or prompt'
+        language=$2
+        shift 2
+        ;;
+      --vad)
+        (($# >= 2)) || die '--vad requires auto, on, or none'
+        vad=$2
+        shift 2
+        ;;
+      --stream)
+        (($# >= 2)) || die '--stream requires auto, on, or none'
+        stream=$2
+        shift 2
+        ;;
+      --output)
+        (($# >= 2)) || die '--output requires a path'
+        output_file=$2
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        return 0
+        ;;
+      --*) die "unknown option: $1" ;;
+      *)
+        if [[ -z $alias ]]; then
+          alias=$1
+        elif [[ -z $audio ]]; then
+          audio=$1
+        else
+          die 'only one model alias and one audio input are supported'
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n $alias ]] || die 'a runtime-qualified model alias is required'
+  [[ -n $audio ]] || die 'an audio input is required'
+  [[ -r $manifest ]] || die "model manifest is not readable: $manifest"
+  [[ -z $threads || $threads =~ ^[1-9][0-9]*$ ]] || \
+    die '--threads must be a positive integer'
+  command -v "$container_engine" >/dev/null 2>&1 || \
+    die "container engine is not available: $container_engine"
+  command -v ffprobe >/dev/null 2>&1 || die 'ffprobe is required for benchmarking'
+  command -v flock >/dev/null 2>&1 || die 'flock is required for atomic JSONL appends'
+
+  local audio_path duration
+  audio_path=$(realpath -e -- "$audio") || die "audio input does not exist: $audio"
+  [[ -f $audio_path && -r $audio_path ]] || die "audio input is not a readable file: $audio_path"
+  duration=$(ffprobe -v error -show_entries format=duration \
+    -of default=noprint_wrappers=1:nokey=1 -- "$audio_path") || \
+    die "ffprobe could not read audio duration: $audio_path"
+  awk -v duration="$duration" 'BEGIN { exit !(duration > 0) }' || \
+    die "audio duration must be positive: $duration"
+
+  local record
+  record=$(record_for_alias "$alias") || die "unknown model alias: $alias"
+  local artifact_id locked_alias runtime name source revision filename destination sha license packaging requires notes
+  IFS='|' read -r artifact_id locked_alias runtime name source revision filename destination sha license packaging requires notes <<< "$record"
+
+  if [[ -z $threads ]]; then
+    if [[ $runtime == nemo-speech ]]; then
+      threads=4
+    else
+      threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')
+    fi
+  fi
+
+  NATIVE_ASR_MODELS="$models_root" \
+    NATIVE_ASR_MODEL_MANIFEST="$manifest" \
+    "$script_dir/verify-models" "$alias" >/dev/null
+  models_root=$(realpath -e -- "$models_root")
+  local model_path=$models_root/$destination model_size
+  if [[ -f $model_path ]]; then
+    model_size=$(stat -c '%s' -- "$model_path")
+  else
+    model_size=$(find "$model_path" -type f \
+      \( -name '*.onnx' -o -name '*.gguf' -o -name '*.bin' \) \
+      -printf '%s\n' | awk '{ total += $1 } END { print total + 0 }')
+    [[ $model_size != 0 ]] || model_size=$(du -sb -- "$model_path" | awk '{print $1}')
+  fi
+
+  local image dockerfile runtime_version runtime_revision engine_version quantization
+  case $runtime in
+    sherpa-onnx)
+      image=asr-sherpa-onnx
+      dockerfile=$repo_root/docker/sherpa-onnx/Dockerfile
+      runtime_version=$(dockerfile_arg "$dockerfile" SHERPA_ONNX_VERSION)
+      runtime_revision=$(dockerfile_arg "$dockerfile" SHERPA_ONNX_REVISION)
+      ;;
+    nemo-speech)
+      image=asr-nemo-speech
+      dockerfile=$repo_root/docker/nemo-speech/Dockerfile
+      runtime_version=$(dockerfile_arg "$dockerfile" NEMO_SPEECH_VERSION)
+      runtime_revision=$(dockerfile_arg "$dockerfile" NEMO_SPEECH_REVISION)
+      ;;
+    *) die "runtime is locked but not implemented: $runtime" ;;
+  esac
+  case $filename in
+    *q8_0*) quantization=q8_0 ;;
+    *int8*) quantization=int8 ;;
+    *) quantization=unknown ;;
+  esac
+  engine_version=$($container_engine version --format '{{.Client.Version}}' 2>/dev/null || printf 'unknown')
+
+  local image_json image_id image_size
+  image_json=$($container_engine image inspect "$image") || die "cannot inspect image: $image"
+  image_id=$(jq -er '.[0].Id' <<< "$image_json") || die "Docker returned no image ID for: $image"
+  image_size=$(jq -er '.[0].Size' <<< "$image_json") || die "Docker returned no image size for: $image"
+
+  local work
+  work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-benchmark.XXXXXX")
+  local work_quoted
+  printf -v work_quoted '%q' "$work"
+  trap "rm -rf -- $work_quoted" EXIT
+  local result_file=$work/result.json stderr_file=$work/runtime.stderr
+  local -a transcribe_args=(--format json --threads "$threads" --vad "$vad" --stream "$stream")
+  [[ -z $language ]] || transcribe_args+=(--language "$language")
+  transcribe_args+=("$alias" "$audio_path")
+
+  local started_ns finished_ns status
+  started_ns=$(date +%s%N)
+  set +e
+  LC_ALL=C \
+    NATIVE_ASR_MODEL_VERIFIED_ALIAS="$alias" \
+    NATIVE_ASR_MEASURE=1 \
+    "$script_dir/transcribe" "${transcribe_args[@]}" \
+    > "$result_file" 2> "$stderr_file"
+  status=$?
+  set -e
+  finished_ns=$(date +%s%N)
+
+  local wall_seconds user_seconds system_seconds peak_rss_kb runtime_exit rtf x_realtime
+  wall_seconds=$(awk -v start="$started_ns" -v finish="$finished_ns" \
+    'BEGIN { printf "%.9f", (finish - start) / 1000000000 }')
+  local metrics_line
+  metrics_line=$(awk -F '\t' '/^NATIVE_ASR_TIME\t/ { line=$0 } END { print line }' "$stderr_file")
+  [[ -n $metrics_line ]] || die 'runtime image emitted no in-container benchmark metrics'
+  IFS=$'\t' read -r _ user_seconds system_seconds peak_rss_kb runtime_exit <<< "$metrics_line"
+  [[ $runtime_exit == "$status" ]] || \
+    die "container and in-container exit statuses disagree: $status != $runtime_exit"
+  rtf=$(awk -v wall="$wall_seconds" -v duration="$duration" \
+    'BEGIN { printf "%.9f", wall / duration }')
+  x_realtime=$(awk -v wall="$wall_seconds" -v duration="$duration" \
+    'BEGIN { if (wall == 0) print "0"; else printf "%.9f", duration / wall }')
+
+  local result_json=null segmentation=unknown timestamp_availability=false
+  if ((status == 0)); then
+    result_json=$(< "$result_file")
+    jq -e 'type == "object"' <<< "$result_json" >/dev/null || \
+      die 'successful transcription did not produce a JSON object'
+    segmentation=$(jq -r '.segmentation // "unknown"' <<< "$result_json")
+    timestamp_availability=$(jq -r \
+      '((.segments? // []) | length > 0) or ((.timestamps? // []) | length > 0) or ((.words? // []) | length > 0)' \
+      <<< "$result_json")
+  fi
+
+  local cpu_model logical_cpus created_at stderr_text record_json
+  cpu_model=$(lscpu 2>/dev/null | sed -n 's/^Model name:[[:space:]]*//p' | head -n 1)
+  [[ -n $cpu_model ]] || cpu_model=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)
+  logical_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 'unknown')
+  created_at=$(date --utc --iso-8601=seconds)
+  stderr_text=$(sed '/^NATIVE_ASR_TIME\t/d' "$stderr_file")
+
+  record_json=$(jq -cn \
+    --arg created_at "$created_at" \
+    --arg runtime "$runtime" \
+    --arg runtime_version "$runtime_version" \
+    --arg runtime_revision "$runtime_revision" \
+    --arg engine_version "$engine_version" \
+    --arg image "$image" \
+    --arg image_id "$image_id" \
+    --argjson image_size "$image_size" \
+    --arg artifact_id "$artifact_id" \
+    --arg model_alias "$alias" \
+    --arg model_name "$name" \
+    --arg artifact_revision "$revision" \
+    --arg artifact_sha256 "$sha" \
+    --arg quantization "$quantization" \
+    --argjson model_size "$model_size" \
+    --arg cpu_model "$cpu_model" \
+    --arg logical_cpus "$logical_cpus" \
+    --argjson threads "$threads" \
+    --arg audio_path "$audio_path" \
+    --arg audio_filename "$(basename -- "$audio_path")" \
+    --argjson audio_duration "$duration" \
+    --arg segmentation "$segmentation" \
+    --argjson wall_seconds "$wall_seconds" \
+    --argjson user_seconds "${user_seconds:-0}" \
+    --argjson system_seconds "${system_seconds:-0}" \
+    --argjson peak_rss_kb "${peak_rss_kb:-0}" \
+    --argjson exit_status "$status" \
+    --argjson rtf "$rtf" \
+    --argjson x_realtime "$x_realtime" \
+    --argjson timestamps "$timestamp_availability" \
+    --arg stderr "$stderr_text" \
+    --argjson result "$result_json" '
+      {
+        schema_version: 1,
+        created_at: $created_at,
+        runtime: {
+          name: $runtime,
+          version: $runtime_version,
+          revision: $runtime_revision
+        },
+        container: {
+          engine_version: $engine_version,
+          image: $image,
+          image_id: $image_id,
+          image_size_bytes: $image_size
+        },
+        model: {
+          artifact_id: $artifact_id,
+          alias: $model_alias,
+          name: $model_name,
+          revision: $artifact_revision,
+          sha256: $artifact_sha256,
+          quantization: $quantization,
+          size_bytes: $model_size
+        },
+        host: {
+          cpu: $cpu_model,
+          logical_cpus: $logical_cpus,
+          threads: $threads
+        },
+        audio: {
+          path: $audio_path,
+          filename: $audio_filename,
+          duration_seconds: $audio_duration,
+          normalization: "container-ffmpeg-16khz-mono-pcm-s16le"
+        },
+        execution: {
+          segmentation: $segmentation,
+          wall_seconds: $wall_seconds,
+          user_seconds: $user_seconds,
+          system_seconds: $system_seconds,
+          peak_rss_kb: $peak_rss_kb,
+          exit_status: $exit_status,
+          rtf: $rtf,
+          x_realtime: $x_realtime,
+          timestamps_available: $timestamps
+        },
+        result: $result,
+        stderr: (if $stderr == "" then null else $stderr end)
+      }')
+
+  local output_dir
+  output_dir=$(dirname -- "$output_file")
+  mkdir -p -- "$output_dir"
+  exec 9>> "$output_file"
+  flock 9
+  printf '%s\n' "$record_json" >&9
+  flock -u 9
+  exec 9>&-
+
+  printf 'benchmark: %s\n' "$alias"
+  printf 'audio:     %.3f s\n' "$duration"
+  printf 'wall:      %.3f s\n' "$wall_seconds"
+  printf 'RTF:       %.3f\n' "$rtf"
+  printf 'speed:     %.3fx realtime\n' "$x_realtime"
+  printf 'peak RSS:  %s KiB\n' "${peak_rss_kb:-unknown}"
+  printf 'exit:      %s\n' "$status"
+  printf 'record:    %s\n' "$output_file"
+
+  if ((status != 0)); then
+    [[ -z $stderr_text ]] || printf '%s\n' "$stderr_text" >&2
+    return "$status"
+  fi
+}
+
+umask 077
+main "$@"

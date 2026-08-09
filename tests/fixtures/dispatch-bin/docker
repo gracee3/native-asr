@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$@" > "${NATIVE_ASR_TEST_DOCKER_LOG:?}"
+if [[ ${1:-} == version ]]; then
+  printf '%s\n' 'test-docker-version'
+  exit 0
+fi
+if [[ ${1:-} == image && ${2:-} == inspect ]]; then
+  jq -cn '[{Id: "sha256:test-image", Size: 12345678}]'
+  exit 0
+fi
+jq -cn '{
+  runtime: "fake-runtime",
+  model_path: "/models/fake-model",
+  audio_path: "/audio/input.wav",
+  segmentation: "fake-segmentation",
+  text: "common dispatcher words"
+}'
+if printf '%s\n' "$@" | grep -Fqx -- '--entrypoint'; then
+  printf 'NATIVE_ASR_TIME\t0.02\t0.01\t4321\t0\n' >&2
+fi

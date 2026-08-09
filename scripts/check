@@ -23,6 +23,8 @@ awk -F'|' '
 ./scripts/models list >/dev/null
 ./tests/sherpa-entrypoint-smoke
 ./tests/nemo-entrypoint-smoke
+./tests/transcribe-smoke
+./tests/benchmark-smoke
 
 if rg -n -i \
   '(COPY|ADD)[[:space:]].*models|ADD[[:space:]]+https?://|huggingface\.co|releases/download/asr-models|\.(gguf|onnx|nemo|safetensors|pt|pth|bin)([^[:alnum:]_]|$)' \

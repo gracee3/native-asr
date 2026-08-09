@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-benchmark-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+models=$work/models
+manifest=$work/models.lock
+audio=$work/input.wav
+mkdir -p "$models/nemo-speech/parakeet-tdt-v3"
+: > "$models/nemo-speech/parakeet-tdt-v3/parakeet-tdt-0.6b-v3.q8_0.gguf"
+ffmpeg -nostdin -hide_banner -loglevel error -f lavfi \
+  -i anullsrc=r=16000:cl=mono -t 0.25 -c:a pcm_s16le "$audio"
+cat > "$manifest" <<'EOF'
+nemo-test|nemo:parakeet-tdt-v3|nemo-speech|Test NeMo|https://invalid.example/model|test-revision|parakeet-tdt-0.6b-v3.q8_0.gguf|nemo-speech/parakeet-tdt-v3/parakeet-tdt-0.6b-v3.q8_0.gguf|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|CC-BY-4.0|file||test
+EOF
+
+export PATH="$repo_root/tests/fixtures/dispatch-bin:$PATH"
+export NATIVE_ASR_CONTAINER_ENGINE=docker
+export NATIVE_ASR_MODELS=$models
+export NATIVE_ASR_MODEL_MANIFEST=$manifest
+export NATIVE_ASR_TEST_DOCKER_LOG=$work/docker.log
+
+output=$work/runs.jsonl
+summary=$(
+  "$repo_root/scripts/benchmark" --output "$output" \
+    nemo:parakeet-tdt-v3 "$audio"
+)
+[[ $(wc -l < "$output") == 1 ]]
+jq -e '
+  .schema_version == 1
+  and .runtime.name == "nemo-speech"
+  and .runtime.version == "1.0.0"
+  and .container.image == "asr-nemo-speech"
+  and .container.image_size_bytes == 12345678
+  and .model.alias == "nemo:parakeet-tdt-v3"
+  and .host.threads == 4
+  and .audio.duration_seconds > 0
+  and .execution.exit_status == 0
+  and .execution.wall_seconds > 0
+  and .execution.user_seconds == 0.02
+  and .execution.system_seconds == 0.01
+  and .execution.peak_rss_kb == 4321
+  and .execution.rtf > 0
+  and .result.text == "common dispatcher words"
+' "$output" >/dev/null
+grep -Fq 'benchmark: nemo:parakeet-tdt-v3' <<< "$summary"
+grep -Fq 'RTF:' <<< "$summary"
+grep -Fqx -- '--entrypoint' "$work/docker.log"
+grep -Fqx -- '/usr/bin/time' "$work/docker.log"
+
+printf '%s\n' 'benchmark smoke: ok'

@@ -1,6 +1,229 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf '%s\n' 'The common transcription dispatcher is not implemented yet.' >&2
-printf '%s\n' 'Model management is available through ./scripts/models and Just.' >&2
-exit 2
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/.." && pwd)
+manifest=${NATIVE_ASR_MODEL_MANIFEST:-$repo_root/manifests/models.lock}
+models_root=${NATIVE_ASR_MODELS:-$repo_root/models}
+container_engine=${NATIVE_ASR_CONTAINER_ENGINE:-docker}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 2
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/transcribe [OPTIONS] MODEL_ALIAS AUDIO
+
+Options:
+  --threads N              inference threads
+  --format text|txt|json   output format (default: text)
+  --language CODE          model language code or prompt
+  --output PATH            write output atomically instead of stdout
+  --vad auto|on|none       sherpa long-form VAD mode (default: auto)
+  --stream auto|on|none    NeMo stateful file mode (default: auto)
+
+The selected model is verified before Docker starts. The container always runs
+with networking disabled and read-only model/audio mounts.
+EOF
+}
+
+record_for_alias() {
+  local wanted=$1
+  awk -F'|' -v wanted="$wanted" '
+    !/^#/ && NF && $2 == wanted { print; found=1; exit }
+    END { if (!found) exit 1 }
+  ' "$manifest"
+}
+
+write_output() {
+  local output=$1 payload=$2
+  if [[ -z $output ]]; then
+    printf '%s\n' "$payload"
+    return 0
+  fi
+
+  local output_dir output_name temporary
+  output_dir=$(dirname -- "$output")
+  output_name=$(basename -- "$output")
+  [[ -d $output_dir ]] || die "output directory does not exist: $output_dir"
+  temporary=$(mktemp "$output_dir/.${output_name}.native-asr.XXXXXX")
+  printf '%s\n' "$payload" > "$temporary"
+  mv -- "$temporary" "$output"
+}
+
+main() {
+  local threads='' format=text language='' output='' vad=auto stream=auto
+  local alias='' audio=''
+
+  while (($#)); do
+    case $1 in
+      --threads)
+        (($# >= 2)) || die '--threads requires a positive integer'
+        threads=$2
+        shift 2
+        ;;
+      --format)
+        (($# >= 2)) || die '--format requires text, txt, or json'
+        format=$2
+        shift 2
+        ;;
+      --language)
+        (($# >= 2)) || die '--language requires a code or prompt'
+        language=$2
+        shift 2
+        ;;
+      --output)
+        (($# >= 2)) || die '--output requires a path'
+        output=$2
+        shift 2
+        ;;
+      --vad)
+        (($# >= 2)) || die '--vad requires auto, on, or none'
+        vad=$2
+        shift 2
+        ;;
+      --stream)
+        (($# >= 2)) || die '--stream requires auto, on, or none'
+        stream=$2
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        return 0
+        ;;
+      --*) die "unknown option: $1" ;;
+      *)
+        if [[ -z $alias ]]; then
+          alias=$1
+        elif [[ -z $audio ]]; then
+          audio=$1
+        else
+          die 'only one model alias and one audio input are supported'
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n $alias ]] || die 'a runtime-qualified model alias is required'
+  [[ -n $audio ]] || die 'an audio input is required'
+  [[ -r $manifest ]] || die "model manifest is not readable: $manifest"
+  [[ $format == text || $format == txt || $format == json ]] || \
+    die '--format must be text, txt, or json'
+  [[ -z $threads || $threads =~ ^[1-9][0-9]*$ ]] || \
+    die '--threads must be a positive integer'
+  [[ $vad == auto || $vad == on || $vad == none ]] || \
+    die '--vad must be auto, on, or none'
+  [[ $stream == auto || $stream == on || $stream == none ]] || \
+    die '--stream must be auto, on, or none'
+  command -v "$container_engine" >/dev/null 2>&1 || \
+    die "container engine is not available: $container_engine"
+
+  local audio_path audio_dir audio_name
+  audio_path=$(realpath -e -- "$audio") || die "audio input does not exist: $audio"
+  [[ -f $audio_path && -r $audio_path ]] || die "audio input is not a readable file: $audio_path"
+  audio_dir=$(dirname -- "$audio_path")
+  audio_name=$(basename -- "$audio_path")
+
+  local record
+  record=$(record_for_alias "$alias") || die "unknown model alias: $alias"
+  local artifact_id locked_alias runtime name source revision filename destination sha license packaging requires notes
+  IFS='|' read -r artifact_id locked_alias runtime name source revision filename destination sha license packaging requires notes <<< "$record"
+
+  if [[ ${NATIVE_ASR_MODEL_VERIFIED_ALIAS:-} != "$alias" ]]; then
+    NATIVE_ASR_MODELS="$models_root" \
+      NATIVE_ASR_MODEL_MANIFEST="$manifest" \
+      "$script_dir/verify-models" "$alias" >/dev/null
+  fi
+  models_root=$(realpath -e -- "$models_root")
+
+  local image runtime_wrapper runtime_root container_model
+  runtime_root=$models_root/$runtime
+  container_model=/models/${destination#*/}
+  case $runtime in
+    sherpa-onnx)
+      image=asr-sherpa-onnx
+      runtime_wrapper=/usr/local/bin/native-asr-sherpa
+      [[ $stream == auto ]] || die '--stream is only configurable for NeMo-Speech.cpp models'
+      ;;
+    nemo-speech)
+      image=asr-nemo-speech
+      runtime_wrapper=/usr/local/bin/native-asr-nemo
+      [[ $vad == auto ]] || die '--vad is only configurable for sherpa-onnx models'
+      ;;
+    *) die "runtime is locked but not implemented: $runtime" ;;
+  esac
+  [[ $runtime_root != *','* && $audio_dir != *','* ]] || \
+    die 'Docker --mount paths containing commas are not supported'
+
+  local -a runtime_args=(
+    transcribe
+    --model "$container_model"
+    --format json
+  )
+  [[ -z $threads ]] || runtime_args+=(--threads "$threads")
+  [[ -z $language ]] || runtime_args+=(--language "$language")
+  if [[ $runtime == sherpa-onnx ]]; then
+    runtime_args+=(--vad "$vad")
+  else
+    runtime_args+=(--stream "$stream")
+  fi
+  runtime_args+=("/audio/$audio_name")
+
+  local -a command=(
+    "$container_engine" run --rm
+    --network none
+    --mount "type=bind,source=$runtime_root,target=/models,readonly"
+    --mount "type=bind,source=$audio_dir,target=/audio,readonly"
+  )
+  if [[ ${NATIVE_ASR_MEASURE:-0} == 1 ]]; then
+    command+=(
+      --entrypoint /usr/bin/time
+      "$image"
+      -f $'NATIVE_ASR_TIME\t%U\t%S\t%M\t%x'
+      "$runtime_wrapper"
+    )
+  else
+    command+=("$image")
+  fi
+  command+=("${runtime_args[@]}")
+
+  local raw_json enriched
+  raw_json=$("${command[@]}")
+  jq -e 'type == "object" and (.text | type == "string")' \
+    <<< "$raw_json" >/dev/null || die 'runtime did not emit a valid transcription JSON object'
+  enriched=$(jq -c \
+    --arg alias "$alias" \
+    --arg source_audio_path "$audio_path" \
+    --arg artifact_id "$artifact_id" \
+    --arg revision "$revision" \
+    --arg sha256 "$sha" \
+    --arg license "$license" \
+    --arg filename "$filename" \
+    '. + {
+      schema_version: 1,
+      model_alias: $alias,
+      source_audio_path: $source_audio_path,
+      model_artifact: {
+        id: $artifact_id,
+        revision: $revision,
+        sha256: $sha256,
+        license: $license,
+        filename: $filename
+      }
+    }' <<< "$raw_json")
+
+  local payload
+  if [[ $format == json ]]; then
+    payload=$enriched
+  else
+    payload=$(jq -er '.text' <<< "$enriched")
+  fi
+  write_output "$output" "$payload"
+}
+
+umask 077
+main "$@"

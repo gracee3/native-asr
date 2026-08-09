@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-dispatch-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+models=$work/models
+manifest=$work/models.lock
+audio_dir=$work/audio
+mkdir -p "$models/nemo-speech/parakeet-tdt-v3" "$models/sherpa-onnx" "$audio_dir"
+: > "$models/nemo-speech/parakeet-tdt-v3/parakeet-tdt-0.6b-v3.q8_0.gguf"
+: > "$models/sherpa-onnx/canary-model"
+: > "$audio_dir/input.wav"
+cat > "$manifest" <<'EOF'
+nemo-test|nemo:parakeet-tdt-v3|nemo-speech|Test NeMo|https://invalid.example/model|test-revision|parakeet-tdt-0.6b-v3.q8_0.gguf|nemo-speech/parakeet-tdt-v3/parakeet-tdt-0.6b-v3.q8_0.gguf|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|CC-BY-4.0|file||test
+sherpa-test|sherpa:canary-180m-flash|sherpa-onnx|Test Sherpa|https://invalid.example/model|test-revision|canary-model|sherpa-onnx/canary-model|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|CC-BY-4.0|file||test
+EOF
+
+export PATH="$repo_root/tests/fixtures/dispatch-bin:$PATH"
+export NATIVE_ASR_CONTAINER_ENGINE=docker
+export NATIVE_ASR_MODELS=$models
+export NATIVE_ASR_MODEL_MANIFEST=$manifest
+export NATIVE_ASR_TEST_DOCKER_LOG=$work/docker.log
+
+json=$(
+  "$repo_root/scripts/transcribe" --format json --threads 4 \
+    nemo:parakeet-tdt-v3 "$audio_dir/input.wav"
+)
+jq -e \
+  --arg audio "$(realpath "$audio_dir/input.wav")" '
+    .schema_version == 1
+    and .model_alias == "nemo:parakeet-tdt-v3"
+    and .source_audio_path == $audio
+    and .model_artifact.revision == "test-revision"
+    and .text == "common dispatcher words"
+  ' <<< "$json" >/dev/null
+grep -Fqx -- '--network' "$work/docker.log"
+grep -Fqx -- 'none' "$work/docker.log"
+grep -Fqx \
+  "type=bind,source=$models/nemo-speech,target=/models,readonly" \
+  "$work/docker.log"
+grep -Fqx \
+  "type=bind,source=$audio_dir,target=/audio,readonly" \
+  "$work/docker.log"
+grep -Fqx -- '--stream' "$work/docker.log"
+
+output=$work/transcript.txt
+"$repo_root/scripts/transcribe" --output "$output" \
+  sherpa:canary-180m-flash "$audio_dir/input.wav"
+[[ $(< "$output") == 'common dispatcher words' ]]
+grep -Fqx 'asr-sherpa-onnx' "$work/docker.log"
+grep -Fqx -- '--vad' "$work/docker.log"
+
+if "$repo_root/scripts/transcribe" --vad on \
+    nemo:parakeet-tdt-v3 "$audio_dir/input.wav" \
+    > "$work/bad.stdout" 2> "$work/bad.stderr"; then
+  printf '%s\n' 'expected runtime-inapplicable option to fail' >&2
+  exit 1
+fi
+grep -Fq -- '--vad is only configurable' "$work/bad.stderr"
+
+printf '%s\n' 'common transcribe smoke: ok'

@@ -86,6 +86,7 @@ RUN apt-get update \
         jq \
         libgcc-s1 \
         libstdc++6 \
+        time \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 65532 native-asr \
     && useradd --system --uid 65532 --gid 65532 \

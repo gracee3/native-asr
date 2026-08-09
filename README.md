@@ -15,13 +15,12 @@ explicit host-side operation, model directories are mounted read-only at
 
 ## Status
 
-The repository foundation, reproducible model lockfile, and sherpa-onnx runtime
-image are in place. The remaining runtime and common interface work proceeds in
-this order:
+The repository foundation, reproducible model lockfile, sherpa-onnx and
+NeMo-Speech.cpp runtime images, common transcription dispatcher, and benchmark
+harness are in place. The remaining runtime work proceeds in this order:
 
-1. NeMo-Speech.cpp;
-2. common transcription and benchmark harness;
-3. Moonshine and whisper.cpp.
+1. benchmark the initial Sherpa and NeMo model set on representative recordings;
+2. add Moonshine and whisper.cpp through the same interfaces.
 
 ## Architecture
 
@@ -108,9 +107,27 @@ The image normalizes common media formats with FFmpeg, defaults offline models
 to the shared Silero VAD when installed, and emits text or compact JSON. The
 Nemotron model uses Sherpa's true stateful streaming decoder for file input.
 
-## Intended common interface
+## NeMo-Speech.cpp transcription
 
-The common interface will be:
+Build the pinned NeMo-Speech.cpp 1.0.0 CPU image and fetch an official NVIDIA
+Q8 GGUF:
+
+```bash
+just build-nemo
+just model nemo:parakeet-tdt-v3
+```
+
+The image builds only the native CLI and ASR library with its pinned ggml
+submodule. Parakeet TDT v3 and CTC run in full-utterance mode; the two Nemotron
+models use the runtime's cache-aware streaming-file path by default.
+
+The pinned upstream ASR runtime currently fixes ggml compute at four CPU
+threads. The wrapper reports and enforces that value so benchmark metadata does
+not imply a thread count the engine did not use.
+
+## Common interface
+
+The runtime-independent path is:
 
 ```bash
 just build-sherpa
@@ -118,18 +135,38 @@ just model sherpa:parakeet-unified-en
 just transcribe sherpa:parakeet-unified-en recording.m4a
 ```
 
-Its Docker boundary remains deliberately explicit:
+It verifies the selected artifact, chooses the image and model path from the
+lockfile, mounts models and audio read-only, and always passes `--network none`.
+Structured output retains the original absolute host audio path and locked
+artifact provenance:
 
 ```bash
-docker run --rm --network none \
-  -v "$NATIVE_ASR_MODELS/sherpa-onnx:/models:ro" \
-  -v "$PWD:/work:ro" \
-  asr-sherpa-onnx \
-  transcribe --model /models/parakeet-unified-en-0.6b-int8 /work/recording.wav
+./scripts/transcribe --format json --threads 8 \
+  sherpa:parakeet-unified-en recording.m4a
 ```
 
 Audio normalization uses a temporary 16 kHz mono PCM16 WAV and never modifies
-the original recording.
+the original recording. `--language`, `--output`, `--vad`, and `--stream` are
+available through the script without expanding the simple Just recipe.
+
+## Benchmarking
+
+Append a provenance-rich JSONL result and print a concise summary:
+
+```bash
+just bench sherpa:parakeet-unified-en recording.m4a
+```
+
+The timed region includes container startup, normalization, model loading, and
+inference. It excludes prior model checksum verification and image inspection.
+Records default to ignored `benchmarks/runs.jsonl` and include raw transcript
+output rather than normalizing punctuation or capitalization.
+
+Show the runtime source pins at any time:
+
+```bash
+just versions
+```
 
 ## Initial model set
 
