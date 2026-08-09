@@ -310,6 +310,8 @@ packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).
 - [`docs/models.md`](docs/models.md) — lockfile and on-disk model contract
 - [`docs/benchmarking.md`](docs/benchmarking.md) — benchmark and accuracy metadata contract
 - [`docs/reproducibility-report.md`](docs/reproducibility-report.md) — validated images, run IDs, and current limitations
+- [`docs/future-ensemble-reconstruction.md`](docs/future-ensemble-reconstruction.md) — deferred ensemble, scheduling, and local-LLM direction
+- [`docs/future-rust-tui.md`](docs/future-rust-tui.md) — deferred terminal UI and event-protocol direction
 
 Private recordings, transcripts, downloaded weights, and local benchmark
 outputs are ignored by Git and the Docker build context. Curated benchmark
