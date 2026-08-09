@@ -1,0 +1,55 @@
+# Model weights and model-management state
+/models/
+*.gguf
+*.onnx
+*.nemo
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# User recordings and normalized working audio
+*.wav
+*.wave
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+*.wma
+*.webm
+*.mp4
+*.mkv
+*.mov
+*.normalized.wav
+
+# Transcripts and benchmark results can contain private speech
+/transcripts/
+/outputs/
+/benchmarks/*
+!/benchmarks/.gitkeep
+/samples/*
+!/samples/.gitkeep
+*.jsonl
+*.srt
+*.vtt
+
+# Builds, caches, and local tooling
+/build/
+/build-*/
+**/build/
+**/build-*/
+.cache/
+.tmp/
+*.partial
+*.part
+*.tmp
+*.log
+
+# Editor and OS files
+.DS_Store
+*~
+*.swp
+.idea/
+.vscode/

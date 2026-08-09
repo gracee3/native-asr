@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' 'The benchmark runner is not implemented yet.' >&2
+exit 2

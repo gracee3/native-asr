@@ -1,0 +1,47 @@
+.git
+.gitignore
+
+# Models must never enter an image build context.
+models
+**/models
+*.gguf
+*.onnx
+*.nemo
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Recordings, transcripts, and benchmark output are host data.
+samples
+benchmarks
+transcripts
+outputs
+*.wav
+*.wave
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+*.wma
+*.webm
+*.mp4
+*.mkv
+*.mov
+*.jsonl
+*.srt
+*.vtt
+
+# Local build state.
+build
+build-*
+**/build
+**/build-*
+.cache
+.tmp
+*.partial
+*.part
+*.tmp
+*.log

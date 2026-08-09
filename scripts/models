@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/.." && pwd)
+manifest=${NATIVE_ASR_MODEL_MANIFEST:-$repo_root/manifests/models.lock}
+models_root=${NATIVE_ASR_MODELS:-$repo_root/models}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/models list
+  scripts/models path
+  scripts/models fetch MODEL_ALIAS...
+  scripts/models fetch --runtime RUNTIME
+  scripts/models fetch --all
+  scripts/models verify [MODEL_ALIAS...]
+
+Environment:
+  NATIVE_ASR_MODELS          model root (default: ./models)
+  NATIVE_ASR_MODEL_MANIFEST  alternate lockfile
+  HF_TOKEN                   optional bearer token for Hugging Face
+EOF
+}
+
+require_manifest() {
+  [[ -r $manifest ]] || die "model manifest is not readable: $manifest"
+}
+
+each_record() {
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z $line || $line == \#* ]] && continue
+    printf '%s\n' "$line"
+  done < "$manifest"
+}
+
+record_for_alias() {
+  local wanted=$1 line alias
+  while IFS= read -r line; do
+    IFS='|' read -r _ alias _ <<< "$line"
+    if [[ $alias == "$wanted" ]]; then
+      printf '%s\n' "$line"
+      return 0
+    fi
+  done < <(each_record)
+  return 1
+}
+
+record_for_artifact() {
+  local wanted=$1 line artifact_id
+  while IFS= read -r line; do
+    IFS='|' read -r artifact_id _ <<< "$line"
+    if [[ $artifact_id == "$wanted" ]]; then
+      printf '%s\n' "$line"
+      return 0
+    fi
+  done < <(each_record)
+  return 1
+}
+
+aliases_for_runtime() {
+  local wanted=$1 line alias runtime
+  while IFS= read -r line; do
+    IFS='|' read -r _ alias runtime _ <<< "$line"
+    [[ $runtime == "$wanted" ]] && printf '%s\n' "$alias"
+  done < <(each_record)
+}
+
+all_model_aliases() {
+  local line alias
+  while IFS= read -r line; do
+    IFS='|' read -r _ alias _ <<< "$line"
+    [[ $alias == sherpa:silero-vad ]] || printf '%s\n' "$alias"
+  done < <(each_record)
+}
+
+assert_safe_models_root() {
+  mkdir -p -- "$models_root"
+  models_root=$(cd -- "$models_root" && pwd)
+
+  case "$models_root/" in
+    "$repo_root/"*)
+      if ! git -C "$repo_root" check-ignore -q -- "$models_root"; then
+        die "refusing model root inside the checkout because Git does not ignore it: $models_root"
+      fi
+      ;;
+  esac
+}
+
+sha256_matches() {
+  local path=$1 expected=$2 actual
+  [[ -f $path ]] || return 1
+  actual=$(sha256sum -- "$path" | awk '{print $1}')
+  [[ $actual == "$expected" ]]
+}
+
+curl_download() {
+  local source=$1 partial=$2
+  local -a args=(
+    --fail --location --show-error
+    --retry 5 --retry-delay 2 --retry-all-errors
+    --continue-at -
+    --output "$partial"
+  )
+  if [[ -n ${HF_TOKEN:-} && $source == https://huggingface.co/* ]]; then
+    args+=(--header "Authorization: Bearer $HF_TOKEN")
+  fi
+  curl "${args[@]}" "$source"
+}
+
+write_tree_receipt() {
+  local tree=$1 artifact_id=$2 alias=$3 revision=$4 artifact_sha=$5
+  (
+    cd -- "$tree"
+    find . -type f \
+      ! -name '.native-asr-artifact' \
+      ! -name '.native-asr-files.sha256' \
+      -print0 | sort -z | xargs -0 -r sha256sum > .native-asr-files.sha256
+    {
+      printf 'artifact_id=%s\n' "$artifact_id"
+      printf 'model_alias=%s\n' "$alias"
+      printf 'revision=%s\n' "$revision"
+      printf 'artifact_sha256=%s\n' "$artifact_sha"
+      printf 'files_manifest_sha256=%s\n' "$(sha256sum .native-asr-files.sha256 | awk '{print $1}')"
+    } > .native-asr-artifact
+  )
+}
+
+verify_tree() {
+  local dest=$1 artifact_id=$2 alias=$3 revision=$4 artifact_sha=$5
+  local receipt=$dest/.native-asr-artifact inventory=$dest/.native-asr-files.sha256
+  [[ -d $dest && -f $receipt && -f $inventory ]] || return 1
+  grep -Fqx "artifact_id=$artifact_id" "$receipt" || return 1
+  grep -Fqx "model_alias=$alias" "$receipt" || return 1
+  grep -Fqx "revision=$revision" "$receipt" || return 1
+  grep -Fqx "artifact_sha256=$artifact_sha" "$receipt" || return 1
+  local expected_inventory actual_inventory
+  expected_inventory=$(sed -n 's/^files_manifest_sha256=//p' "$receipt")
+  actual_inventory=$(sha256sum "$inventory" | awk '{print $1}')
+  [[ -n $expected_inventory && $actual_inventory == "$expected_inventory" ]] || return 1
+  (cd -- "$dest" && sha256sum --quiet -c .native-asr-files.sha256)
+}
+
+verify_record() {
+  local line=$1 require_present=${2:-false}
+  local artifact_id alias runtime name source revision filename destination sha license packaging requires notes
+  IFS='|' read -r artifact_id alias runtime name source revision filename destination sha license packaging requires notes <<< "$line"
+  local dest=$models_root/$destination
+
+  case $packaging in
+    file)
+      if [[ ! -e $dest ]]; then
+        if [[ $require_present == true ]]; then
+          printf 'MISSING  %s (%s)\n' "$alias" "$dest" >&2
+          return 1
+        fi
+        printf 'missing  %s\n' "$alias"
+        return 0
+      fi
+      if sha256_matches "$dest" "$sha"; then
+        printf 'ok       %s\n' "$alias"
+      else
+        printf 'INVALID  %s (%s)\n' "$alias" "$dest" >&2
+        return 1
+      fi
+      ;;
+    tar.bz2)
+      if [[ ! -e $dest ]]; then
+        if [[ $require_present == true ]]; then
+          printf 'MISSING  %s (%s)\n' "$alias" "$dest" >&2
+          return 1
+        fi
+        printf 'missing  %s\n' "$alias"
+        return 0
+      fi
+      if verify_tree "$dest" "$artifact_id" "$alias" "$revision" "$sha"; then
+        printf 'ok       %s\n' "$alias"
+      else
+        printf 'INVALID  %s (%s)\n' "$alias" "$dest" >&2
+        return 1
+      fi
+      ;;
+    *) die "unsupported packaging '$packaging' for $artifact_id" ;;
+  esac
+}
+
+fetch_record() {
+  local line=$1
+  local artifact_id alias runtime name source revision filename destination sha license packaging requires notes
+  IFS='|' read -r artifact_id alias runtime name source revision filename destination sha license packaging requires notes <<< "$line"
+  local dest=$models_root/$destination
+
+  case $packaging in
+    file)
+      if sha256_matches "$dest" "$sha"; then
+        printf 'already valid: %s\n' "$alias"
+        return 0
+      fi
+      [[ ! -e $dest ]] || die "existing artifact is invalid; refusing to overwrite: $dest"
+      mkdir -p -- "$(dirname -- "$dest")"
+      local partial=$dest.partial
+      printf 'downloading %s\n' "$alias"
+      curl_download "$source" "$partial"
+      if ! sha256_matches "$partial" "$sha"; then
+        rm -f -- "$partial"
+        die "checksum mismatch for $alias"
+      fi
+      mv -- "$partial" "$dest"
+      printf 'installed: %s -> %s\n' "$alias" "$dest"
+      ;;
+    tar.bz2)
+      if verify_tree "$dest" "$artifact_id" "$alias" "$revision" "$sha"; then
+        printf 'already valid: %s\n' "$alias"
+        return 0
+      fi
+      [[ ! -e $dest ]] || die "existing model tree is invalid; refusing to overwrite: $dest"
+      local cache_dir=$models_root/.downloads
+      mkdir -p -- "$cache_dir" "$(dirname -- "$dest")"
+      local partial=$cache_dir/$filename.partial
+      printf 'downloading %s\n' "$alias"
+      curl_download "$source" "$partial"
+      if ! sha256_matches "$partial" "$sha"; then
+        rm -f -- "$partial"
+        die "checksum mismatch for $alias"
+      fi
+
+      local member
+      while IFS= read -r member; do
+        [[ $member != /* && $member != ../* && $member != *'/../'* ]] || \
+          die "unsafe archive member in $filename: $member"
+      done < <(tar -tjf "$partial")
+
+      local stage
+      stage=$(mktemp -d "$models_root/.stage.${artifact_id}.XXXXXX")
+      tar -xjf "$partial" -C "$stage"
+      local -a roots=()
+      mapfile -t roots < <(find "$stage" -mindepth 1 -maxdepth 1 -printf '%f\n')
+      if (( ${#roots[@]} != 1 )) || [[ ! -d $stage/${roots[0]} ]]; then
+        rm -rf -- "$stage"
+        die "expected one top-level directory in $filename"
+      fi
+      write_tree_receipt "$stage/${roots[0]}" "$artifact_id" "$alias" "$revision" "$sha"
+      mv -- "$stage/${roots[0]}" "$dest"
+      rmdir -- "$stage"
+      rm -f -- "$partial"
+      printf 'installed: %s -> %s\n' "$alias" "$dest"
+      ;;
+    *) die "unsupported packaging '$packaging' for $artifact_id" ;;
+  esac
+}
+
+declare -A fetch_seen=()
+fetch_alias() {
+  local alias=$1 line requires dependency
+  [[ -z ${fetch_seen[$alias]:-} ]] || return 0
+  line=$(record_for_alias "$alias") || die "unknown model alias: $alias"
+  fetch_seen[$alias]=1
+  IFS='|' read -r _ _ _ _ _ _ _ _ _ _ _ requires _ <<< "$line"
+  if [[ -n $requires ]]; then
+    IFS=',' read -r -a dependencies <<< "$requires"
+    for dependency in "${dependencies[@]}"; do
+      fetch_alias "$dependency"
+    done
+  fi
+  fetch_record "$line"
+}
+
+cmd_list() {
+  printf '%-37s %-13s %-9s %s\n' ALIAS RUNTIME LICENSE NAME
+  local line alias runtime name license
+  while IFS= read -r line; do
+    IFS='|' read -r _ alias runtime name _ _ _ _ _ license _ <<< "$line"
+    [[ $alias == sherpa:silero-vad ]] && continue
+    printf '%-37s %-13s %-9s %s\n' "$alias" "$runtime" "$license" "$name"
+  done < <(each_record)
+}
+
+cmd_fetch() {
+  (($# > 0)) || die 'fetch requires a model alias, --runtime, or --all'
+  local -a aliases=()
+  case $1 in
+    --all)
+      (($# == 1)) || die '--all does not take additional arguments'
+      mapfile -t aliases < <(all_model_aliases)
+      ;;
+    --runtime)
+      (($# == 2)) || die '--runtime requires exactly one runtime name'
+      mapfile -t aliases < <(aliases_for_runtime "$2")
+      ((${#aliases[@]} > 0)) || die "unknown runtime: $2"
+      ;;
+    *) aliases=("$@") ;;
+  esac
+  assert_safe_models_root
+  local alias
+  for alias in "${aliases[@]}"; do
+    fetch_alias "$alias"
+  done
+}
+
+cmd_verify() {
+  assert_safe_models_root
+  local status=0 line alias
+  if (($# == 0)); then
+    while IFS= read -r line; do
+      verify_record "$line" false || status=1
+    done < <(each_record)
+  else
+    for alias in "$@"; do
+      line=$(record_for_alias "$alias") || die "unknown model alias: $alias"
+      verify_record "$line" true || status=1
+      IFS='|' read -r _ _ _ _ _ _ _ _ _ _ _ requires _ <<< "$line"
+      if [[ -n $requires ]]; then
+        IFS=',' read -r -a dependencies <<< "$requires"
+        local dependency dep_line
+        for dependency in "${dependencies[@]}"; do
+          dep_line=$(record_for_alias "$dependency") || die "unknown dependency alias: $dependency"
+          verify_record "$dep_line" true || status=1
+        done
+      fi
+    done
+  fi
+  return "$status"
+}
+
+require_manifest
+command=${1:-}
+[[ -n $command ]] || { usage; exit 2; }
+shift
+case $command in
+  list) (($# == 0)) || die 'list takes no arguments'; cmd_list ;;
+  path) (($# == 0)) || die 'path takes no arguments'; printf '%s\n' "$models_root" ;;
+  fetch) cmd_fetch "$@" ;;
+  verify) cmd_verify "$@" ;;
+  -h|--help|help) usage ;;
+  *)
+    # Convenience compatibility: scripts/models MODEL_ALIAS
+    cmd_fetch "$command" "$@"
+    ;;
+esac
