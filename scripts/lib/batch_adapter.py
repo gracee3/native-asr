@@ -36,6 +36,8 @@ def batch_policy(record: dict[str, str]) -> str:
         return (f"bounded-{SHERPA_PARAKEET_MAX_FILES}-files-"
                 f"{SHERPA_PARAKEET_MAX_AUDIO_SECONDS:g}-audio-seconds-"
                 f"vad-over-{SHERPA_PARAKEET_LONG_AUDIO_SECONDS:g}-seconds-v2")
+    if record["alias"] == "nemo:parakeet-ctc-1.1b":
+        return "runtime-native-json-minus-nan-confidence-null-v2"
     return "runtime-native-v1"
 
 
@@ -44,6 +46,53 @@ def _json_text(payload: dict) -> str:
         return payload["text"]
     transcription = payload.get("transcription", [])
     return " ".join(item.get("text", "") for item in transcription).strip()
+
+
+def _runtime_json_payload(path: Path) -> dict:
+    """Load runtime JSON, canonicalizing its known non-finite CTC confidence."""
+    source = path.read_text(encoding="utf-8")
+    try:
+        return json.loads(source)
+    except json.JSONDecodeError:
+        # NeMo-Speech.cpp can serialize an undefined aggregate CTC confidence
+        # as the non-standard JSON number -nan. Replace only an unquoted value
+        # token; transcript strings containing the same characters are kept.
+        normalized: list[str] = []
+        index = 0
+        in_string = False
+        escaped = False
+        replacements = 0
+        value_prefix = " \t\r\n:[,"
+        value_suffix = " \t\r\n,]}"
+        while index < len(source):
+            character = source[index]
+            if in_string:
+                normalized.append(character)
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    in_string = False
+                index += 1
+                continue
+            if character == '"':
+                in_string = True
+                normalized.append(character)
+                index += 1
+                continue
+            if (source.startswith("-nan", index)
+                    and (index == 0 or source[index - 1] in value_prefix)
+                    and (index + 4 == len(source) or source[index + 4] in value_suffix)):
+                normalized.append("null")
+                replacements += 1
+                index += 4
+                continue
+            normalized.append(character)
+            index += 1
+        if not replacements:
+            raise
+        return json.loads("".join(normalized))
 
 
 def _container_base(runtime: str, models: Path, input_dir: Path, output_dir: Path) -> list[str]:
@@ -250,7 +299,7 @@ def run_batch(record: dict[str, str], utterances: list[dict], models: Path,
                 failures.update({file.stem: message for file in group})
         if record["runtime"] not in ("sherpa-onnx", "moonshine"):
             for output in output_dir.rglob("*.json"):
-                hypotheses[output.stem] = _json_text(json.loads(output.read_text(encoding="utf-8")))
+                hypotheses[output.stem] = _json_text(_runtime_json_payload(output))
             process = processes[0]
             for file in files:
                 if process.returncode != 0 or file.stem not in hypotheses:

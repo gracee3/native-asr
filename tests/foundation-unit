@@ -121,7 +121,9 @@ with tempfile.TemporaryDirectory() as raw:
         output_dir = Path(output_mount.removeprefix("type=bind,source=").removesuffix(
             ",target=/output"
         ))
-        (output_dir / "u1.json").write_text('{"text":"from output"}\n', encoding="utf-8")
+        (output_dir / "u1.json").write_text(
+            '{"text":"from output -nan","confidence":-nan}\n', encoding="utf-8"
+        )
         return SimpleNamespace(
             stdout="", stderr="NATIVE_ASR_TIME\t1.0\t0.5\t8192\t0\n", returncode=0,
         )
@@ -135,7 +137,7 @@ with tempfile.TemporaryDirectory() as raw:
         )
     finally:
         batch_adapter.subprocess.run = original_run
-    assert output_runtime.hypotheses == {"u1": "from output"}
+    assert output_runtime.hypotheses == {"u1": "from output -nan"}
     assert not output_runtime.failures
 
     # Parakeet's pinned CLI silently emits empty hypotheses for a large
