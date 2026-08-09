@@ -2,9 +2,12 @@
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd -- "$script_dir/.." && pwd)
+source "$script_dir/lib/paths.sh"
+repo_root=$NATIVE_ASR_REPO_ROOT
 manifest=${NATIVE_ASR_MODEL_MANIFEST:-$repo_root/manifests/models.lock}
-models_root=${NATIVE_ASR_MODELS:-$repo_root/models}
+components_manifest=${NATIVE_ASR_MODEL_COMPONENTS_MANIFEST:-$repo_root/manifests/model-components.lock}
+models_root=$NATIVE_ASR_MODELS
+cache_root=$NATIVE_ASR_CACHE/models
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -22,7 +25,8 @@ Usage:
   scripts/models verify [MODEL_ALIAS...]
 
 Environment:
-  NATIVE_ASR_MODELS          model root (default: ./models)
+  NATIVE_ASR_MODELS          model root (default: /data/models)
+  NATIVE_ASR_CACHE           cache root (default: /data/cache/native-asr)
   NATIVE_ASR_MODEL_MANIFEST  alternate lockfile
   HF_TOKEN                   optional bearer token for Hugging Face
 EOF
@@ -75,7 +79,7 @@ all_model_aliases() {
   local line alias
   while IFS= read -r line; do
     IFS='|' read -r _ alias _ <<< "$line"
-    [[ $alias == sherpa:silero-vad ]] || printf '%s\n' "$alias"
+    [[ $alias == *:silero-vad ]] || printf '%s\n' "$alias"
   done < <(each_record)
 }
 
@@ -103,14 +107,37 @@ curl_download() {
   local source=$1 partial=$2
   local -a args=(
     --fail --location --show-error
-    --retry 5 --retry-delay 2 --retry-all-errors
     --continue-at -
     --output "$partial"
   )
   if [[ -n ${HF_TOKEN:-} && $source == https://huggingface.co/* ]]; then
     args+=(--header "Authorization: Bearer $HF_TOKEN")
   fi
-  curl "${args[@]}" "$source"
+  local attempt
+  for attempt in 1 2 3 4 5 6; do
+    if curl "${args[@]}" "$source"; then
+      return 0
+    fi
+    ((attempt < 6)) || return 1
+    printf 'download interrupted; resuming in 2 seconds (%s/6)\n' "$attempt" >&2
+    sleep 2
+  done
+}
+
+make_runtime_readable() {
+  local tree=$1
+  find "$tree" -type d -exec chmod a+rx {} +
+  find "$tree" -type f -exec chmod a+r {} +
+}
+
+component_records() {
+  local wanted=$1 line artifact_id
+  [[ -r $components_manifest ]] || die "component manifest is not readable: $components_manifest"
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z $line || $line == \#* ]] && continue
+    IFS='|' read -r artifact_id _ <<< "$line"
+    [[ $artifact_id == "$wanted" ]] && printf '%s\n' "$line"
+  done < "$components_manifest"
 }
 
 write_tree_receipt() {
@@ -169,7 +196,7 @@ verify_record() {
         return 1
       fi
       ;;
-    tar.bz2)
+    tar.bz2|tree)
       if [[ ! -e $dest ]]; then
         if [[ $require_present == true ]]; then
           printf 'MISSING  %s (%s)\n' "$alias" "$dest" >&2
@@ -202,15 +229,22 @@ fetch_record() {
         return 0
       fi
       [[ ! -e $dest ]] || die "existing artifact is invalid; refusing to overwrite: $dest"
-      mkdir -p -- "$(dirname -- "$dest")"
-      local partial=$dest.partial
-      printf 'downloading %s\n' "$alias"
-      curl_download "$source" "$partial"
-      if ! sha256_matches "$partial" "$sha"; then
-        rm -f -- "$partial"
-        die "checksum mismatch for $alias"
+      local cached=$cache_root/files/$artifact_id/$filename
+      mkdir -p -- "$(dirname -- "$dest")" "$(dirname -- "$cached")"
+      if ! sha256_matches "$cached" "$sha"; then
+        [[ ! -e $cached ]] || die "invalid cached artifact; refusing to overwrite: $cached"
+        local partial=$cached.partial
+        printf 'downloading %s\n' "$alias"
+        curl_download "$source" "$partial"
+        if ! sha256_matches "$partial" "$sha"; then
+          rm -f -- "$partial"
+          die "checksum mismatch for $alias"
+        fi
+        mv -- "$partial" "$cached"
       fi
-      mv -- "$partial" "$dest"
+      local staged=$dest.stage.$$
+      cp --reflink=auto -- "$cached" "$staged"
+      mv -- "$staged" "$dest"
       printf 'installed: %s -> %s\n' "$alias" "$dest"
       ;;
     tar.bz2)
@@ -219,25 +253,36 @@ fetch_record() {
         return 0
       fi
       [[ ! -e $dest ]] || die "existing model tree is invalid; refusing to overwrite: $dest"
-      local cache_dir=$models_root/.downloads
+      local cache_dir=$cache_root/archives
       mkdir -p -- "$cache_dir" "$(dirname -- "$dest")"
-      local partial=$cache_dir/$filename.partial
-      printf 'downloading %s\n' "$alias"
-      curl_download "$source" "$partial"
-      if ! sha256_matches "$partial" "$sha"; then
-        rm -f -- "$partial"
-        die "checksum mismatch for $alias"
+      local archive=$cache_dir/$filename
+      if ! sha256_matches "$archive" "$sha"; then
+        [[ ! -e $archive ]] || die "invalid cached archive; refusing to overwrite: $archive"
+        local partial=$archive.partial
+        printf 'downloading %s\n' "$alias"
+        curl_download "$source" "$partial"
+        if ! sha256_matches "$partial" "$sha"; then
+          rm -f -- "$partial"
+          die "checksum mismatch for $alias"
+        fi
+        mv -- "$partial" "$archive"
       fi
 
       local member
       while IFS= read -r member; do
         [[ $member != /* && $member != ../* && $member != *'/../'* ]] || \
           die "unsafe archive member in $filename: $member"
-      done < <(tar -tjf "$partial")
+      done < <(tar -tjf "$archive")
+      if tar -tvjf "$archive" | awk '
+          substr($1, 1, 1) == "l" || substr($1, 1, 1) == "h" { found=1 }
+          END { exit !found }
+        '; then
+        die "archive contains a symbolic or hard link: $filename"
+      fi
 
       local stage
       stage=$(mktemp -d "$models_root/.stage.${artifact_id}.XXXXXX")
-      tar -xjf "$partial" -C "$stage"
+      tar -xjf "$archive" -C "$stage" --no-same-owner --no-same-permissions
       local -a roots=()
       mapfile -t roots < <(find "$stage" -mindepth 1 -maxdepth 1 -printf '%f\n')
       if (( ${#roots[@]} != 1 )) || [[ ! -d $stage/${roots[0]} ]]; then
@@ -245,9 +290,49 @@ fetch_record() {
         die "expected one top-level directory in $filename"
       fi
       write_tree_receipt "$stage/${roots[0]}" "$artifact_id" "$alias" "$revision" "$sha"
+      make_runtime_readable "$stage/${roots[0]}"
       mv -- "$stage/${roots[0]}" "$dest"
       rmdir -- "$stage"
-      rm -f -- "$partial"
+      printf 'installed: %s -> %s\n' "$alias" "$dest"
+      ;;
+    tree)
+      if verify_tree "$dest" "$artifact_id" "$alias" "$revision" "$sha"; then
+        printf 'already valid: %s\n' "$alias"
+        return 0
+      fi
+      [[ ! -e $dest ]] || die "existing model tree is invalid; refusing to overwrite: $dest"
+      mkdir -p -- "$cache_root/components/$artifact_id" "$(dirname -- "$dest")"
+      local stage component_count=0 relative component_source component_revision component_size component_sha
+      stage=$(mktemp -d "$(dirname -- "$dest")/.stage.${artifact_id}.XXXXXX")
+      while IFS= read -r component; do
+        IFS='|' read -r _ relative component_source component_revision component_size component_sha <<< "$component"
+        [[ $relative != /* && $relative != ../* && $relative != *'/../'* ]] || \
+          die "unsafe component path for $artifact_id: $relative"
+        local cached=$cache_root/components/$artifact_id/$relative
+        mkdir -p -- "$(dirname -- "$cached")" "$(dirname -- "$stage/$relative")"
+        if ! sha256_matches "$cached" "$component_sha"; then
+          [[ ! -e $cached ]] || die "invalid cached component; refusing to overwrite: $cached"
+          printf 'downloading %s component %s\n' "$alias" "$relative"
+          curl_download "$component_source" "$cached.partial"
+          if ! sha256_matches "$cached.partial" "$component_sha"; then
+            rm -f -- "$cached.partial"
+            die "checksum mismatch for $alias component $relative"
+          fi
+          [[ $(stat -c '%s' -- "$cached.partial") == "$component_size" ]] || \
+            die "size mismatch for $alias component $relative"
+          mv -- "$cached.partial" "$cached"
+        fi
+        cp --reflink=auto -- "$cached" "$stage/$relative"
+        ((component_count += 1))
+      done < <(component_records "$artifact_id")
+      ((component_count > 0)) || die "no components locked for $artifact_id"
+      write_tree_receipt "$stage" "$artifact_id" "$alias" "$revision" "$sha"
+      local computed_tree_sha
+      computed_tree_sha=$(sha256sum "$stage/.native-asr-files.sha256" | awk '{print $1}')
+      [[ $computed_tree_sha == "$sha" ]] || \
+        die "component-tree digest mismatch for $alias: $computed_tree_sha"
+      make_runtime_readable "$stage"
+      mv -- "$stage" "$dest"
       printf 'installed: %s -> %s\n' "$alias" "$dest"
       ;;
     *) die "unsupported packaging '$packaging' for $artifact_id" ;;
@@ -275,7 +360,7 @@ cmd_list() {
   local line alias runtime name license
   while IFS= read -r line; do
     IFS='|' read -r _ alias runtime name _ _ _ _ _ license _ <<< "$line"
-    [[ $alias == sherpa:silero-vad ]] && continue
+    [[ $alias == *:silero-vad ]] && continue
     printf '%-37s %-13s %-9s %s\n' "$alias" "$runtime" "$license" "$name"
   done < <(each_record)
 }

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+defaults=$(env -u NATIVE_ASR_MODELS -u NATIVE_ASR_CACHE -u NATIVE_ASR_DATASETS \
+  -u NATIVE_ASR_BENCHMARKS bash -c \
+  'source "$1/scripts/lib/paths.sh"; printf "%s\n%s\n%s\n%s\n" "$NATIVE_ASR_MODELS" "$NATIVE_ASR_CACHE" "$NATIVE_ASR_DATASETS" "$NATIVE_ASR_BENCHMARKS"' \
+  bash "$repo_root")
+grep -Fqx /data/models <<< "$defaults"
+grep -Fqx /data/cache/native-asr <<< "$defaults"
+grep -Fqx /data/datasets/native-asr <<< "$defaults"
+grep -Fqx /data/benchmarks/native-asr/runs.jsonl <<< "$defaults"
+
+override=$(NATIVE_ASR_MODELS=/tmp/test-models bash -c \
+  'source "$1/scripts/lib/paths.sh"; printf "%s\n" "$NATIVE_ASR_MODELS"' bash "$repo_root")
+[[ $override == /tmp/test-models ]]
+
+PYTHONPATH="$repo_root/scripts/lib" python3 - <<'PY'
+from evaluation import errors, normalize
+
+assert normalize(" It’s—fine...  isn't it? ") == "IT'S FINE ISN'T IT"
+assert errors("A B C", "A X C") == {
+    "errors": 1, "substitutions": 1, "deletions": 0,
+    "insertions": 0, "reference_words": 3,
+}
+assert errors("A B", "A B C")["insertions"] == 1
+assert errors("A B C", "A C")["deletions"] == 1
+assert errors("", "EXTRA")["insertions"] == 1
+PY
+
+printf '%s\n' 'paths and evaluation smoke: ok'

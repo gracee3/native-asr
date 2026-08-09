@@ -1,5 +1,6 @@
 # Model weights and model-management state
 /models/
+/models
 *.gguf
 *.onnx
 *.nemo
