@@ -233,10 +233,15 @@ def run_batch(record: dict[str, str], utterances: list[dict], models: Path,
                         pass
                 for file, payload in zip(group, payloads, strict=False):
                     hypotheses[file.stem] = _json_text(payload)
-            for file in group:
-                if process.returncode != 0 or file.stem not in hypotheses:
-                    failures[file.stem] = (process.stderr[-4000:] or
-                                           f"batch runtime exited {process.returncode}")
+            # Sherpa and Moonshine emit hypotheses on their captured streams,
+            # so they can be validated here. NeMo and Whisper write JSON files
+            # under /output; validate those only after loading that directory
+            # below.
+            if record["runtime"] in ("sherpa-onnx", "moonshine"):
+                for file in group:
+                    if process.returncode != 0 or file.stem not in hypotheses:
+                        failures[file.stem] = (process.stderr[-4000:] or
+                                               f"batch runtime exited {process.returncode}")
             if (record["alias"] == "sherpa:parakeet-unified-en" and group and
                     all(file.stem in hypotheses and not hypotheses[file.stem].strip()
                         for file in group)):

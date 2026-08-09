@@ -110,6 +110,34 @@ with tempfile.TemporaryDirectory() as raw:
     assert result.user_seconds == 1.25 and result.peak_rss_kb == 4096
     assert result.model_loads == 1
 
+    # Output-directory runtimes are validated only after their JSON artifacts
+    # are loaded. In particular, a successful NeMo batch must not be marked as
+    # failed merely because it does not emit hypotheses on stdout.
+    def fake_output_runtime(command, **kwargs):
+        output_mount = next(
+            item for item in command
+            if item.startswith("type=bind,source=") and item.endswith(",target=/output")
+        )
+        output_dir = Path(output_mount.removeprefix("type=bind,source=").removesuffix(
+            ",target=/output"
+        ))
+        (output_dir / "u1.json").write_text('{"text":"from output"}\n', encoding="utf-8")
+        return SimpleNamespace(
+            stdout="", stderr="NATIVE_ASR_TIME\t1.0\t0.5\t8192\t0\n", returncode=0,
+        )
+    batch_adapter.subprocess.run = fake_output_runtime
+    try:
+        output_runtime = batch_adapter.run_batch(
+            {"runtime": "nemo-speech", "destination": "nemo-speech/model.gguf",
+             "alias": "nemo:fixture"},
+            [{"utterance_id": "u1", "prepared_path": str(prepared)}],
+            root / "models", root / "cache", 4,
+        )
+    finally:
+        batch_adapter.subprocess.run = original_run
+    assert output_runtime.hypotheses == {"u1": "from output"}
+    assert not output_runtime.failures
+
     # Parakeet's pinned CLI silently emits empty hypotheses for a large
     # concurrent stream set. The adapter uses bounded, fingerprinted groups and
     # aggregates their timing while retaining every utterance mapping.
