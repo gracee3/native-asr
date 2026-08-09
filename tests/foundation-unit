@@ -108,6 +108,67 @@ with tempfile.TemporaryDirectory() as raw:
     assert len(calls) == 1
     assert result.hypotheses == {"u1": "first", "u2": "second"}
     assert result.user_seconds == 1.25 and result.peak_rss_kb == 4096
+    assert result.model_loads == 1
+
+    # Parakeet's pinned CLI silently emits empty hypotheses for a large
+    # concurrent stream set. The adapter uses bounded, fingerprinted groups and
+    # aggregates their timing while retaining every utterance mapping.
+    parakeet_rows = [
+        {"utterance_id": f"p{index}", "prepared_path": str(prepared),
+         "duration_seconds": 1.0}
+        for index in range(19)
+    ]
+    calls = []
+    def fake_parakeet(command, **kwargs):
+        calls.append(command)
+        audio = [Path(item).stem for item in command if item.startswith("/audio/")]
+        return SimpleNamespace(
+            stdout="".join(json.dumps({"text": item}) + "\n" for item in audio),
+            stderr="NATIVE_ASR_TIME\t1.0\t0.5\t8192\t0\n", returncode=0,
+        )
+    batch_adapter.subprocess.run = fake_parakeet
+    try:
+        bounded = batch_adapter.run_batch(
+            {"runtime": "sherpa-onnx", "destination": "sherpa-onnx/parakeet",
+             "alias": "sherpa:parakeet-unified-en"},
+            parakeet_rows, root / "models", root / "cache", 8,
+        )
+    finally:
+        batch_adapter.subprocess.run = original_run
+    assert [sum(item.startswith("/audio/") for item in call) for call in calls] == [16, 3]
+    assert bounded.hypotheses == {f"p{index}": f"p{index}" for index in range(19)}
+    assert not bounded.failures and bounded.model_loads == 2
+    assert bounded.user_seconds == 2.0 and bounded.peak_rss_kb == 8192
+    assert batch_adapter._sherpa_vad_text(
+        "0.10 -- 1.20: first segment\n1.30 -- 2.40: second segment\n"
+    ) == "first segment second segment"
+    long_groups = batch_adapter._sherpa_parakeet_groups(
+        [Path(f"p{index}.wav") for index in range(3)],
+        [*parakeet_rows[:2],
+         {"utterance_id": "long", "prepared_path": str(prepared),
+          "duration_seconds": 20.1}],
+    )
+    assert [(len(group), use_vad) for group, use_vad in long_groups] == [(2, False), (1, True)]
+
+    # A successful process with only empty Parakeet payloads is a runtime
+    # failure, not a valid 100% deletion WER result.
+    def fake_empty_parakeet(command, **kwargs):
+        audio = [item for item in command if item.startswith("/audio/")]
+        return SimpleNamespace(
+            stdout="".join('{"text":""}\n' for _ in audio),
+            stderr="NATIVE_ASR_TIME\t1.0\t0.5\t8192\t0\n", returncode=0,
+        )
+    batch_adapter.subprocess.run = fake_empty_parakeet
+    try:
+        empty = batch_adapter.run_batch(
+            {"runtime": "sherpa-onnx", "destination": "sherpa-onnx/parakeet",
+             "alias": "sherpa:parakeet-unified-en"},
+            parakeet_rows[:2], root / "models", root / "cache", 8,
+        )
+    finally:
+        batch_adapter.subprocess.run = original_run
+    assert set(empty.failures) == {"p0", "p1"}
+    assert all("only empty hypotheses" in message for message in empty.failures.values())
 
     # A nonzero batch process is never upgraded to success merely because it
     # emitted parseable partial output before failing.

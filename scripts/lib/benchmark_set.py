@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 
-from batch_adapter import run_batch
+from batch_adapter import batch_policy, run_batch
 from evaluation import NORMALIZATION_VERSION, errors, normalize
 
 
@@ -130,7 +130,7 @@ def main() -> None:
     threads = (1 if record["runtime"] == "moonshine" else
                (args.threads or (4 if record["runtime"] == "nemo-speech" else (os.cpu_count() or 1))))
     options = {"threads": "runtime-managed" if record["runtime"] == "moonshine" else threads,
-               "normalization": NORMALIZATION_VERSION,
+               "normalization": NORMALIZATION_VERSION, "batching": batch_policy(record),
                "subset": "sha256(utterance_id)", "limit": args.limit}
     identity = {
         "schema_version": 2, "image_id": image_id, "model_alias": args.model,
@@ -220,7 +220,8 @@ def main() -> None:
         "total_audio_seconds": audio_seconds, "wall_seconds": wall_total,
         "cold_start_model_load_and_first_inference_seconds": cold_probe_wall,
         "batch_wall_seconds": batch.wall_seconds,
-        "batch_model_loads": 1, "batch_model_reused_for_utterances": len(utterances),
+        "batch_model_loads": batch.model_loads,
+        "batch_model_reused_for_utterances": len(utterances) - batch.model_loads,
         "user_seconds": batch.user_seconds, "system_seconds": batch.system_seconds,
         "peak_rss_kb": batch.peak_rss_kb, "rtf": wall_total / audio_seconds if audio_seconds else None,
         "wer": wer, **totals,

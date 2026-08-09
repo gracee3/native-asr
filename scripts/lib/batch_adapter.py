@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-container, one-model-load adapters for prepared utterance sets."""
+"""Bounded native-runtime batch adapters for prepared utterance sets."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -21,7 +22,21 @@ class BatchResult:
     user_seconds: float | None
     system_seconds: float | None
     peak_rss_kb: int | None
+    model_loads: int
     stderr: str
+
+
+SHERPA_PARAKEET_MAX_FILES = 16
+SHERPA_PARAKEET_MAX_AUDIO_SECONDS = 90.0
+SHERPA_PARAKEET_LONG_AUDIO_SECONDS = 20.0
+
+
+def batch_policy(record: dict[str, str]) -> str:
+    if record["alias"] == "sherpa:parakeet-unified-en":
+        return (f"bounded-{SHERPA_PARAKEET_MAX_FILES}-files-"
+                f"{SHERPA_PARAKEET_MAX_AUDIO_SECONDS:g}-audio-seconds-"
+                f"vad-over-{SHERPA_PARAKEET_LONG_AUDIO_SECONDS:g}-seconds-v2")
+    return "runtime-native-v1"
 
 
 def _json_text(payload: dict) -> str:
@@ -74,6 +89,20 @@ def _sherpa(record: dict[str, str], files: list[Path], threads: int, base: list[
     return _timed(base, binary, [*common, *(f"/audio/{path.name}" for path in files)])
 
 
+def _sherpa_parakeet_vad(record: dict[str, str], file: Path, threads: int,
+                         base: list[str]) -> list[str]:
+    destination = record["destination"].split("/", 1)[1]
+    model = f"/models/{destination}"
+    return _timed(base, "/opt/native-asr/bin/sherpa-onnx-vad-with-offline-asr", [
+        "--silero-vad-model=/models/_shared/silero_vad.onnx",
+        "--silero-vad-threshold=0.2", "--silero-vad-min-speech-duration=0.2",
+        f"--num-threads={threads}", f"--encoder={model}/encoder.int8.onnx",
+        f"--decoder={model}/decoder.int8.onnx", f"--joiner={model}/joiner.int8.onnx",
+        f"--tokens={model}/tokens.txt", "--model-type=nemo_transducer",
+        f"/audio/{file.name}",
+    ])
+
+
 def _nemo(record: dict[str, str], base: list[str]) -> list[str]:
     model = "/models/" + record["destination"].split("/", 1)[1]
     arguments = ["transcribe", "/audio", "--model", model, "--device", "cpu",
@@ -111,6 +140,41 @@ def _timing(stderr: str) -> tuple[float | None, float | None, int | None]:
     return None, None, None
 
 
+def _sherpa_vad_text(output: str) -> str:
+    segments = []
+    for line in output.splitlines():
+        match = re.match(r"^\s*\d+(?:\.\d+)?\s+--\s+\d+(?:\.\d+)?:\s*(.*)$", line)
+        if match and match.group(1).strip():
+            segments.append(match.group(1).strip())
+    return " ".join(segments)
+
+
+def _sherpa_parakeet_groups(files: list[Path], utterances: list[dict]) \
+        -> list[tuple[list[Path], bool]]:
+    groups: list[tuple[list[Path], bool]] = []
+    current: list[Path] = []
+    current_audio_seconds = 0.0
+    for file, utterance in zip(files, utterances, strict=True):
+        duration = float(utterance["duration_seconds"])
+        if duration > SHERPA_PARAKEET_LONG_AUDIO_SECONDS:
+            if current:
+                groups.append((current, False))
+                current = []
+                current_audio_seconds = 0.0
+            groups.append(([file], True))
+            continue
+        if current and (len(current) >= SHERPA_PARAKEET_MAX_FILES or
+                        current_audio_seconds + duration > SHERPA_PARAKEET_MAX_AUDIO_SECONDS):
+            groups.append((current, False))
+            current = []
+            current_audio_seconds = 0.0
+        current.append(file)
+        current_audio_seconds += duration
+    if current:
+        groups.append((current, False))
+    return groups
+
+
 def run_batch(record: dict[str, str], utterances: list[dict], models: Path,
               cache: Path, threads: int) -> BatchResult:
     batch_root = cache / "bench-batch"
@@ -128,37 +192,67 @@ def run_batch(record: dict[str, str], utterances: list[dict], models: Path,
                 shutil.copy2(row["prepared_path"], target)
             files.append(target)
         base = _container_base(record["runtime"], models, input_dir, output_dir)
-        command = {
-            "sherpa-onnx": lambda: _sherpa(record, files, threads, base),
-            "nemo-speech": lambda: _nemo(record, base),
-            "moonshine": lambda: _moonshine(record, files, base),
-            "whisper-cpp": lambda: _whisper(record, files, threads, base),
-        }[record["runtime"]]()
+        groups = ([(files, False)] if record["alias"] != "sherpa:parakeet-unified-en" else
+                  _sherpa_parakeet_groups(files, utterances))
+        commands = []
+        for group, use_vad in groups:
+            if use_vad:
+                commands.append(_sherpa_parakeet_vad(record, group[0], threads, base))
+            else:
+                commands.append({
+                    "sherpa-onnx": lambda: _sherpa(record, group, threads, base),
+                    "nemo-speech": lambda: _nemo(record, base),
+                    "moonshine": lambda: _moonshine(record, group, base),
+                    "whisper-cpp": lambda: _whisper(record, group, threads, base),
+                }[record["runtime"]]())
         started = time.monotonic()
-        process = subprocess.run(command, text=True, capture_output=True)
+        processes = [subprocess.run(command, text=True, capture_output=True)
+                     for command in commands]
         wall = time.monotonic() - started
-        user_seconds, system_seconds, peak_rss_kb = _timing(process.stderr)
         hypotheses: dict[str, str] = {}
-        if record["runtime"] in ("sherpa-onnx", "moonshine"):
-            payloads = []
-            payload_source = (process.stderr if record["alias"] == "sherpa:nemotron-streaming-en"
-                              else process.stdout)
-            for line in payload_source.splitlines():
-                try:
-                    payloads.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-            for file, payload in zip(files, payloads, strict=False):
-                hypotheses[file.stem] = _json_text(payload)
-        else:
+        failures: dict[str, str] = {}
+        timing = [_timing(process.stderr) for process in processes]
+        user_seconds = (sum(row[0] for row in timing if row[0] is not None)
+                        if all(row[0] is not None for row in timing) else None)
+        system_seconds = (sum(row[1] for row in timing if row[1] is not None)
+                          if all(row[1] is not None for row in timing) else None)
+        peaks = [row[2] for row in timing if row[2] is not None]
+        peak_rss_kb = max(peaks) if len(peaks) == len(timing) else None
+        for (group, use_vad), process in zip(groups, processes, strict=True):
+            if use_vad:
+                hypotheses[group[0].stem] = _sherpa_vad_text(process.stdout)
+            elif record["runtime"] in ("sherpa-onnx", "moonshine"):
+                payloads = []
+                payload_source = (process.stderr
+                                  if record["alias"] == "sherpa:nemotron-streaming-en"
+                                  else process.stdout)
+                for line in payload_source.splitlines():
+                    try:
+                        payloads.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+                for file, payload in zip(group, payloads, strict=False):
+                    hypotheses[file.stem] = _json_text(payload)
+            for file in group:
+                if process.returncode != 0 or file.stem not in hypotheses:
+                    failures[file.stem] = (process.stderr[-4000:] or
+                                           f"batch runtime exited {process.returncode}")
+            if (record["alias"] == "sherpa:parakeet-unified-en" and group and
+                    all(file.stem in hypotheses and not hypotheses[file.stem].strip()
+                        for file in group)):
+                message = ("sherpa parakeet batch returned only empty hypotheses "
+                           f"for {len(group)} inputs under policy {batch_policy(record)}")
+                failures.update({file.stem: message for file in group})
+        if record["runtime"] not in ("sherpa-onnx", "moonshine"):
             for output in output_dir.rglob("*.json"):
                 hypotheses[output.stem] = _json_text(json.loads(output.read_text(encoding="utf-8")))
-        failures = {}
-        for file in files:
-            if process.returncode != 0 or file.stem not in hypotheses:
-                failures[file.stem] = (process.stderr[-4000:] or
-                                       f"batch runtime exited {process.returncode}")
+            process = processes[0]
+            for file in files:
+                if process.returncode != 0 or file.stem not in hypotheses:
+                    failures[file.stem] = (process.stderr[-4000:] or
+                                           f"batch runtime exited {process.returncode}")
+        stderr = "\n".join(process.stderr for process in processes)
         return BatchResult(hypotheses, failures, wall, user_seconds, system_seconds,
-                           peak_rss_kb, process.stderr[-16000:])
+                           peak_rss_kb, len(processes), stderr[-16000:])
     finally:
         shutil.rmtree(work, ignore_errors=True)
