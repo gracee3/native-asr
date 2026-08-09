@@ -30,10 +30,10 @@ A result must name its mode and segmentation parameters. Runs are comparable
 only when normalization and segmentation are equivalent or the difference is
 made explicit.
 
-Transcripts stay raw for side-by-side accuracy review. A future WER layer may
-derive normalized evaluation text, but it must retain both the original model
-output and the normalized text. Private recordings, transcripts, and JSONL
-results are ignored by Git by default.
+Accuracy details retain both raw and normalized text. English normalization
+policy `english-upper-apostrophe-v1` uppercases text, normalizes apostrophes,
+replaces other punctuation with spaces, and collapses whitespace. Aggregate WER
+stores substitutions, deletions, insertions, reference words, and failures.
 
 ## Measurement boundary
 
@@ -46,4 +46,31 @@ GNU `/usr/bin/time` runs inside the image and supplies recognizer CPU time and
 peak RSS. Host nanosecond timestamps supply end-to-end elapsed time, including
 container startup, and FFprobe supplies source duration. The script appends one
 compact record under an exclusive `flock`, including failed runs and their exit
-status. The default destination is `benchmarks/runs.jsonl`.
+status. The default destination is `/data/benchmarks/native-asr/runs.jsonl`.
+
+## Public evaluation sets
+
+`scripts/datasets` locks, fetches, verifies, and prepares LibriSpeech
+`test-clean`/`test-other` and AMI `ES2004a`. Official archives remain cached;
+timed inputs are precomputed 16 kHz mono PCM16 files. JSONL manifests preserve
+utterance ID, split, paths, raw reference, duration, speaker, and source digest.
+
+`scripts/benchmark-set` ranks subset candidates by SHA-256 of utterance ID,
+starts one runtime container, loads the model once, and scores independent
+reference/hypothesis pairs. Detail output is atomic and prior runs remain.
+Resume requires identical image, model, dataset, preprocessing, and options.
+A separate single-utterance cold calibration probe records startup, model load,
+and first-inference wall time; it is not included in the long-lived batch RTF.
+
+Streaming JSONL uses `stt_partial`, `stt_final`, `stt_error`, and `stt_metrics`
+with ordered sequence, audio position, monotonic time, text, finality, and
+latency. Sherpa and NeMo expose stateful file decoding but no incremental CLI
+callback, so their adapters report zero partials instead of inventing them.
+Streaming summaries retain image/model/audio/adapter fingerprints, CPU time,
+peak RSS, RTF, failures, and event-order validation. Paced runs report partial
+and finalization lag; unpaced AMI runs leave those latency fields null rather
+than subtracting media time from throughput time.
+
+The latest local engineering validation and the boundary between completed
+smoke coverage and the not-yet-executed full staged matrix are recorded in
+[`reproducibility-report.md`](reproducibility-report.md).

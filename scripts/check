@@ -20,11 +20,33 @@ awk -F'|' '
   END { exit !ok }
 ' manifests/models.lock
 
+awk -F'|' '
+  BEGIN { ok=1 }
+  !/^#/ && NF && NF != 6 {
+    print FNR ": expected 6 model-component fields, got " NF > "/dev/stderr"
+    ok=0
+  }
+  END { exit !ok }
+' manifests/model-components.lock
+
+awk -F'|' '
+  BEGIN { ok=1 }
+  !/^#/ && NF && NF != 14 {
+    print FNR ": expected 14 dataset-lock fields, got " NF > "/dev/stderr"
+    ok=0
+  }
+  END { exit !ok }
+' manifests/datasets.lock
+
+python3 -m py_compile scripts/lib/*.py
+
 ./scripts/models list >/dev/null
 ./tests/sherpa-entrypoint-smoke
 ./tests/nemo-entrypoint-smoke
 ./tests/transcribe-smoke
 ./tests/benchmark-smoke
+./tests/paths-evaluation-smoke
+./tests/foundation-unit
 
 if rg -n -i \
   '(COPY|ADD)[[:space:]].*models|ADD[[:space:]]+https?://|huggingface\.co|releases/download/asr-models|\.(gguf|onnx|nemo|safetensors|pt|pth|bin)([^[:alnum:]_]|$)' \

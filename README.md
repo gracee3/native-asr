@@ -15,12 +15,9 @@ explicit host-side operation, model directories are mounted read-only at
 
 ## Status
 
-The repository foundation, reproducible model lockfile, sherpa-onnx and
-NeMo-Speech.cpp runtime images, common transcription dispatcher, and benchmark
-harness are in place. The remaining runtime work proceeds in this order:
-
-1. benchmark the initial Sherpa and NeMo model set on representative recordings;
-2. add Moonshine and whisper.cpp through the same interfaces.
+Four pinned native CPU runtimes, nine ASR aliases, locked public evaluation
+corpora, stateful streaming adapters, and reproducible WER/performance suites
+share one model-free, network-disabled container interface.
 
 ## Architecture
 
@@ -29,11 +26,17 @@ native runtime image       host model directory       host audio
 (no model weights)    +    (read-only /models)   +    (read-only input)
 ```
 
-The model directory defaults to `./models` and can be placed elsewhere:
+Large artifacts default to the dedicated `/data` filesystem:
 
 ```bash
-export NATIVE_ASR_MODELS=/data/native-asr-models
+NATIVE_ASR_MODELS=/data/models
+NATIVE_ASR_CACHE=/data/cache/native-asr
+NATIVE_ASR_DATASETS=/data/datasets/native-asr
+NATIVE_ASR_BENCHMARKS=/data/benchmarks/native-asr/runs.jsonl
 ```
+
+Each variable remains an explicit environment override. A checkout-local
+`models` symlink is supported for compatibility.
 
 The directory is never used as a Docker build input. Deleting or rebuilding an
 image therefore does not remove a model or require it to be downloaded again.
@@ -65,10 +68,11 @@ just models-nemo
 just models
 ```
 
-Downloads resume when possible, land in a temporary file, are verified against
-the committed SHA-256, and are atomically published. Existing valid files are
-not downloaded again. `HF_TOKEN` is supported for a future gated Hugging Face
-artifact, but none of the initial artifacts require it.
+Downloads resume in the project cache, are verified against committed SHA-256
+digests, and are installed through same-filesystem staging and atomic rename.
+Verified archives remain cached. Existing valid files are not downloaded again;
+invalid destinations are never overwritten. `HF_TOKEN` is supported, but none
+of the locked artifacts require it.
 
 Verify installed artifacts without network access:
 
@@ -94,7 +98,7 @@ Run inference with no container network and read-only model/audio mounts:
 
 ```bash
 docker run --rm --network none \
-  -v "${NATIVE_ASR_MODELS:-$PWD/models}/sherpa-onnx:/models:ro" \
+  -v "${NATIVE_ASR_MODELS:-/data/models}/sherpa-onnx:/models:ro" \
   -v "$PWD:/work:ro" \
   asr-sherpa-onnx \
   transcribe \
@@ -125,6 +129,22 @@ The pinned upstream ASR runtime currently fixes ggml compute at four CPU
 threads. The wrapper reports and enforces that value so benchmark metadata does
 not imply a thread count the engine did not use.
 
+## Moonshine and whisper.cpp
+
+Moonshine v0.1.1 uses its native C++ streaming interface and the locked Small
+Streaming English ORT component tree. whisper.cpp v1.9.2 is built CPU-only and
+uses the official F16 `small.en` model plus Silero VAD v6.2.0:
+
+```bash
+just build-moonshine
+just models-moonshine
+just transcribe moonshine:small-streaming-en recording.m4a
+
+just build-whisper
+just models-whisper
+just transcribe whisper:small.en recording.m4a
+```
+
 ## Common interface
 
 The runtime-independent path is:
@@ -137,6 +157,9 @@ just transcribe sherpa:parakeet-unified-en recording.m4a
 
 It verifies the selected artifact, chooses the image and model path from the
 lockfile, mounts models and audio read-only, and always passes `--network none`.
+Containers use the invoking non-root UID/GID so private readable audio does not
+need to be made world-readable; a root caller falls back to the image's
+unprivileged `65532:65532` identity.
 Structured output retains the original absolute host audio path and locked
 artifact provenance:
 
@@ -159,8 +182,21 @@ just bench sherpa:parakeet-unified-en recording.m4a
 
 The timed region includes container startup, normalization, model loading, and
 inference. It excludes prior model checksum verification and image inspection.
-Records default to ignored `benchmarks/runs.jsonl` and include raw transcript
-output rather than normalizing punctuation or capitalization.
+Single-file records and set/suite summaries default to the external benchmark
+store. Dataset runs retain raw and normalized text, use versioned English WER,
+load each model once per batch, and resume only when every fingerprint matches:
+
+```bash
+just datasets
+just prepare-datasets
+just benchmark-set whisper:small.en librispeech-test-clean
+just bench-suite staged
+```
+
+The staged suite evaluates deterministic 100-utterance subsets, the four fixed
+finalists on full LibriSpeech splits, a reproducible five-minute paced stream,
+and the full AMI meeting. AMI is not assigned a misleading overlap-sensitive
+full-meeting WER.
 
 Show the runtime source pins at any time:
 
@@ -179,6 +215,8 @@ just versions
 | `nemo:nemotron-streaming-en` | streaming and cross-runtime comparison | Q8 GGUF |
 | `nemo:nemotron-3.5-streaming` | multilingual streaming phase two | Q8 GGUF |
 | `nemo:parakeet-ctc-1.1b` | experimental batch-throughput model | Q8 GGUF |
+| `moonshine:small-streaming-en` | low-latency stateful English model | quantized multi-file ORT tree |
+| `whisper:small.en` | established English accuracy baseline | F16 GGML with Silero VAD |
 
 Every URL, upstream revision, digest, license identifier, quantization, and
 packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).
@@ -188,6 +226,7 @@ packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).
 - [`docs/architecture.md`](docs/architecture.md) — layer boundaries and image invariants
 - [`docs/models.md`](docs/models.md) — lockfile and on-disk model contract
 - [`docs/benchmarking.md`](docs/benchmarking.md) — benchmark and accuracy metadata contract
+- [`docs/reproducibility-report.md`](docs/reproducibility-report.md) — validated images, run IDs, and current limitations
 
 Private recordings, transcripts, downloaded weights, and benchmark outputs are
 ignored by both Git and the Docker build context.

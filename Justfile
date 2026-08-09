@@ -11,8 +11,16 @@ build-sherpa:
 build-nemo:
     docker build --file docker/nemo-speech/Dockerfile --tag asr-nemo-speech .
 
+# Build the pinned Moonshine native streaming runtime image.
+build-moonshine:
+    docker build --file docker/moonshine/Dockerfile --tag asr-moonshine .
+
+# Build the pinned whisper.cpp CPU runtime image.
+build-whisper:
+    docker build --file docker/whisper-cpp/Dockerfile --tag asr-whisper-cpp .
+
 # Build every currently implemented runtime image.
-build: build-sherpa build-nemo
+build: build-sherpa build-nemo build-moonshine build-whisper
 
 # Run host-side syntax, manifest, policy, and wrapper smoke tests.
 check:
@@ -34,6 +42,12 @@ models-sherpa:
 models-nemo:
     @./scripts/models fetch --runtime nemo-speech
 
+models-moonshine:
+    @./scripts/models fetch --runtime moonshine
+
+models-whisper:
+    @./scripts/models fetch --runtime whisper-cpp
+
 # Download one runtime-qualified model alias.
 model alias:
     @./scripts/models fetch {{ quote(alias) }}
@@ -49,6 +63,31 @@ transcribe alias audio:
 # Benchmark one model/audio pair and append a provenance-rich JSONL record.
 bench alias audio:
     @./scripts/benchmark {{ quote(alias) }} {{ quote(audio) }}
+
+# Locked public evaluation corpora.
+datasets:
+    @./scripts/datasets fetch
+
+dataset dataset:
+    @./scripts/datasets fetch {{ quote(dataset) }}
+
+prepare-datasets:
+    @./scripts/datasets prepare
+
+verify-datasets:
+    @./scripts/datasets verify
+
+dataset-dir:
+    @./scripts/datasets path
+
+benchmark-set alias dataset:
+    @./scripts/benchmark-set {{ quote(alias) }} {{ quote(dataset) }}
+
+bench-suite suite:
+    @./scripts/benchmark-suite {{ quote(suite) }}
+
+stream alias audio:
+    @./scripts/stream {{ quote(alias) }} {{ quote(audio) }}
 
 # Print source versions and revisions pinned by the runtime images.
 versions:

@@ -43,6 +43,7 @@
 **/build-*/
 .cache/
 .tmp/
+__pycache__/
 *.partial
 *.part
 *.tmp

@@ -184,10 +184,16 @@ main() {
   esac
   runtime_args+=("/audio/$audio_name")
 
+  local container_user
+  if [[ $(id -u) == 0 ]]; then
+    container_user=65532:65532
+  else
+    container_user=$(id -u):$(id -g)
+  fi
   local -a command=(
     "$container_engine" run --rm
     --network none
-    --user "$(id -u):$(id -g)"
+    --user "$container_user"
     --mount "type=bind,source=$runtime_root,target=/models,readonly"
     --mount "type=bind,source=$audio_dir,target=/audio,readonly"
   )

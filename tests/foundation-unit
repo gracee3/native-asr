@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+NATIVE_ASR_REPO_ROOT=$repo_root \
+NATIVE_ASR_MODELS=/tmp/native-asr-test-models \
+NATIVE_ASR_CACHE=/tmp/native-asr-test-cache \
+NATIVE_ASR_DATASETS=/tmp/native-asr-test-datasets \
+NATIVE_ASR_BENCHMARKS=/tmp/native-asr-test-benchmarks/runs.jsonl \
+PYTHONPATH=$repo_root/scripts/lib python3 - <<'PY'
+from io import BytesIO
+import hashlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
+import tarfile
+import tempfile
+
+import batch_adapter
+import benchmark_set
+import datasets
+import stream
+
+
+with tempfile.TemporaryDirectory() as raw:
+    root = Path(raw)
+
+    # Checksum failures are rejected, including same-sized corrupt payloads.
+    corrupt = root / "asset.bin"
+    corrupt.write_bytes(b"wrong")
+    checksum_row = {"size": "5", "sha256": hashlib.sha256(b"right").hexdigest(), "md5": ""}
+    assert not datasets.valid_asset(corrupt, checksum_row)
+
+    # Archive traversal and link-like members are rejected before extraction.
+    archive = root / "unsafe.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        member = tarfile.TarInfo("../escape")
+        member.size = 1
+        handle.addfile(member, BytesIO(b"x"))
+    try:
+        datasets.install_asset({"packaging": "tar.gz", "install_path": "payload"},
+                               archive, root / "unsafe-stage")
+    except SystemExit as error:
+        assert "unsafe archive member" in str(error)
+    else:
+        raise AssertionError("unsafe archive was accepted")
+
+    # Dataset publication stages beside the destination, then atomically appears.
+    source = root / "source.bin"
+    source.write_bytes(b"locked")
+    row = {
+        "asset_id": "fixture-asset", "sha256": hashlib.sha256(b"locked").hexdigest(),
+        "packaging": "file", "install_path": "payload/source.bin", "expected_count": "0",
+    }
+    datasets.DATASETS = root / "datasets"
+    original_selected, original_download = datasets.selected, datasets.download
+    datasets.selected = lambda names: {"fixture": [row]}
+    datasets.download = lambda selected_row: source
+    try:
+        datasets.fetch(["fixture"])
+    finally:
+        datasets.selected, datasets.download = original_selected, original_download
+    assert (datasets.DATASETS / "fixture/payload/source.bin").read_bytes() == b"locked"
+    assert not list(datasets.DATASETS.glob(".stage.*"))
+
+    # Installed LibriSpeech counts are exact, rather than receipt-only checks.
+    counted = datasets.DATASETS / "librispeech-fixture"
+    counted.mkdir()
+    count_row = {"asset_id": "counted", "sha256": "abc", "expected_count": "2"}
+    (counted / ".native-asr-dataset").write_text("counted=abc\n", encoding="utf-8")
+    (counted / "one.flac").touch(); (counted / "two.flac").touch()
+    assert datasets.installed("librispeech-fixture", [count_row])
+    (counted / "three.flac").touch()
+    assert not datasets.installed("librispeech-fixture", [count_row])
+
+    # Resume accepts only a matching successful fingerprint.
+    benchmark_set.RUNS = root / "runs.jsonl"
+    benchmark_set.RUNS.write_text(
+        json.dumps({"run_fingerprint": "same", "status": "failed"}) + "\n" +
+        json.dumps({"run_fingerprint": "same", "status": "complete", "run_id": "ok"}) + "\n",
+        encoding="utf-8",
+    )
+    assert benchmark_set.previous_complete("same")["run_id"] == "ok"
+    assert benchmark_set.previous_complete("different") is None
+
+    # A dataset batch creates one runtime process and maps independent hypotheses.
+    prepared = root / "prepared.wav"
+    prepared.write_bytes(b"wav-fixture")
+    calls = []
+    original_run = batch_adapter.subprocess.run
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            stdout='{"text":"first"}\n{"text":"second"}\n',
+            stderr="NATIVE_ASR_TIME\t1.25\t0.25\t4096\t0\n", returncode=0,
+        )
+    batch_adapter.subprocess.run = fake_run
+    try:
+        result = batch_adapter.run_batch(
+            {"runtime": "moonshine", "destination": "moonshine/model", "alias": "fixture"},
+            [{"utterance_id": "u1", "prepared_path": str(prepared)},
+             {"utterance_id": "u2", "prepared_path": str(prepared)}],
+            root / "models", root / "cache", 1,
+        )
+    finally:
+        batch_adapter.subprocess.run = original_run
+    assert len(calls) == 1
+    assert result.hypotheses == {"u1": "first", "u2": "second"}
+    assert result.user_seconds == 1.25 and result.peak_rss_kb == 4096
+
+    # A nonzero batch process is never upgraded to success merely because it
+    # emitted parseable partial output before failing.
+    def fake_failure(command, **kwargs):
+        return SimpleNamespace(stdout='{"text":"partial"}\n', stderr="runtime failed", returncode=1)
+    batch_adapter.subprocess.run = fake_failure
+    try:
+        failed = batch_adapter.run_batch(
+            {"runtime": "moonshine", "destination": "moonshine/model", "alias": "fixture"},
+            [{"utterance_id": "u1", "prepared_path": str(prepared)}],
+            root / "models", root / "cache", 1,
+        )
+    finally:
+        batch_adapter.subprocess.run = original_run
+    assert failed.failures == {"u1": "runtime failed"}
+
+    # Streaming sequences must be contiguous and monotonic.
+    assert stream.next_event({"sequence": 0, "monotonic_emission_seconds": 0.1}, -1, -1) == (0, 0.1)
+    assert stream.next_event({"sequence": 1, "monotonic_emission_seconds": 0.2}, 0, 0.1) == (1, 0.2)
+    try:
+        stream.next_event({"sequence": 3, "monotonic_emission_seconds": 0.3}, 1, 0.2)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("skipped stream sequence was accepted")
+    try:
+        stream.next_event({"sequence": 2, "monotonic_emission_seconds": 0.1}, 1, 0.2)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("decreasing emission time was accepted")
+    assert stream.timing("noise\nNATIVE_ASR_TIME\t1.5\t0.25\t8192\t0\n") == (1.5, 0.25, 8192)
+
+print("foundation unit tests: ok")
+PY
