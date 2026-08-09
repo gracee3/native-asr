@@ -20,9 +20,11 @@ corpora, stateful streaming adapters, and reproducible WER/performance suites
 share one model-free, network-disabled container interface.
 
 The deterministic 100-utterance gate is complete for all nine aliases on both
-LibriSpeech splits: 18/18 runs completed with zero failures. The full-corpus
-stage is intentionally not published yet; it remains resumable from the
-external benchmark ledger after this snapshot is reviewed.
+LibriSpeech splits: 18/18 runs completed with zero failures. A lower-commitment
+full-corpus checkpoint is also complete for Sherpa Parakeet and NeMo Parakeet
+TDT v3 on all 2,620 `test-clean` utterances. Those are two of the intended
+eight full-split finalist cells; the other six and the final streaming matrix
+remain pending.
 
 ## Validated benchmark snapshot
 
@@ -54,6 +56,27 @@ image IDs, policies, and limitations are in the
 The exact 18 summary records and their 1,800 per-utterance detail records are
 published in the
 [`2026-08-09 benchmark snapshot`](benchmarks/published/2026-08-09-librispeech-100/README.md).
+
+## Initial validated full-split checkpoint
+
+These are the first two complete `test-clean` finalist cells, not a ranking of
+all four finalists. Both used the same 2,620-utterance, 5.403-hour manifest,
+clean Git revision `44f2eaf`, locked artifacts, CPU-only containers, and the
+same normalization and host described above. Every utterance detail row
+validated with zero runtime failures.
+
+| Model | WER | S / D / I | RTF | Peak RSS GiB | Model loads | Run ID |
+|---|---:|---:|---:|---:|---:|---|
+| `sherpa:parakeet-unified-en` | 2.12% | 809 / 206 / 101 | 0.141 | 3.66 | 378 | `20260809T210123493196Z-ab7728fffe58` |
+| `nemo:parakeet-tdt-v3` | 2.15% | 915 / 97 / 119 | 0.160 | 0.99 | 1 | `20260809T214700876989Z-7fed3a8f2e1c` |
+
+The Sherpa adapter's fingerprinted v4 policy includes every retry in timing and
+memory accounting; it recursively isolates exit-zero empty groups and uses
+lossless balanced chunks only when the pinned VAD also returns empty. The exact
+two summaries and 5,240 public-corpus detail records are in the
+[`full test-clean checkpoint`](benchmarks/published/2026-08-09-librispeech-test-clean-pair/README.md).
+Interpretation, the rejected pre-fix attempt, and remaining work are documented
+in the [`reproducibility report`](docs/reproducibility-report.md).
 
 ## Architecture
 
@@ -252,7 +275,11 @@ full-meeting WER.
 Dataset evaluation uses a fingerprinted batching policy for each runtime.
 Most runtimes reuse one model load across the set; Sherpa Parakeet uses bounded
 groups and routes utterances over 20 seconds through the same pinned Silero VAD
-path used for production long-form transcription.
+path used for production long-form transcription. If the upstream CLI exits
+zero with an empty group, the adapter recursively isolates the affected input,
+then tries VAD and finally balanced lossless chunks of at most 10 seconds. All
+fallback processes contribute to wall time, CPU time, peak RSS, and model-load
+counts; nonzero runtime exits are never upgraded to success.
 
 Show the runtime source pins at any time:
 

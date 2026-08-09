@@ -69,11 +69,14 @@ scores independent reference/hypothesis pairs with a fingerprinted
 runtime-specific batching policy. Most runtimes use one container and one model
 load for the set. Sherpa Parakeet uses bounded groups and the pinned Silero VAD
 path for utterances over 20 seconds to avoid the upstream offline CLI's large
-concurrent-stream and long-utterance failure modes. Detail output is atomic and
-prior runs remain. Resume requires identical image, model, dataset,
-preprocessing, adapter, and options. A separate single-utterance cold
-calibration probe records startup, model load, and first-inference wall time;
-it is not included in the batch RTF.
+concurrent-stream and long-utterance failure modes. An exit-zero empty group is
+recursively bisected; an affected singleton uses VAD, then balanced lossless
+chunks of at most 10 seconds only if VAD is also empty. Retry processes are
+included in timing, RSS, and model-load metrics, while nonzero exits remain
+failures. Detail output is atomic and prior runs remain. Resume requires
+identical image, model, dataset, preprocessing, adapter, and options. A separate
+single-utterance cold calibration probe records startup, model load, and
+first-inference wall time; it is not included in the batch RTF.
 
 Streaming JSONL uses `stt_partial`, `stt_final`, `stt_error`, and `stt_metrics`
 with ordered sequence, audio position, monotonic time, text, finality, and
@@ -84,12 +87,14 @@ peak RSS, RTF, failures, and event-order validation. Paced runs report partial
 and finalization lag; unpaced AMI runs leave those latency fields null rather
 than subtracting media time from throughput time.
 
-The latest engineering and deterministic subset validation, plus the boundary
-between completed subset coverage and pending full/streaming stages, are in
+The latest engineering, deterministic subset, and initial full-split
+validation, plus the boundary between completed and pending stages, are in
 [`reproducibility-report.md`](reproducibility-report.md).
 
 The exact records behind the README's validated 100-utterance tables are
 versioned in
 [`benchmarks/published/2026-08-09-librispeech-100`](../benchmarks/published/2026-08-09-librispeech-100/README.md).
+The initial two-model full `test-clean` records are versioned separately in
+[`benchmarks/published/2026-08-09-librispeech-test-clean-pair`](../benchmarks/published/2026-08-09-librispeech-test-clean-pair/README.md).
 Generated ledgers remain external by default; only reviewed snapshots derived
 from public evaluation corpora belong in that directory.

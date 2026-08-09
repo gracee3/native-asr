@@ -77,6 +77,42 @@ canonicalized three native non-standard `-nan` aggregate confidence values to
 JSON `null` on `test-clean`; transcript text was unaffected and all 100 strict
 records were validated.
 
+## Initial full-split `test-clean` validation
+
+Two requested finalist cells completed on clean Git revision
+`44f2eafd6a6513617ead992714dab26c120b9bef`. Both used the complete locked
+2,620-utterance `librispeech-test-clean` manifest: 19,452.481 seconds (5.403
+hours) and 52,576 normalized reference words. All 5,240 detail records have
+`exit_status=0`, no failure text, and a mapped hypothesis. RTF excludes the
+separately recorded cold-start probe, as in the subset table.
+
+| Model | Run ID | WER | S / D / I | RTF | Wall min | Peak RSS KiB | Loads |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `sherpa:parakeet-unified-en` | `20260809T210123493196Z-ab7728fffe58` | 2.12% | 809 / 206 / 101 | 0.141 | 45.56 | 3,836,880 | 378 |
+| `nemo:parakeet-tdt-v3` | `20260809T214700876989Z-7fed3a8f2e1c` | 2.15% | 915 / 97 / 119 | 0.160 | 52.01 | 1,036,020 | 1 |
+
+This is a two-model checkpoint, not the final four-finalist ranking. Sherpa is
+slightly lower in WER and RTF in these two rows, while NeMo uses substantially
+less peak memory and one model load. The other two `test-clean` finalists and
+all four `test-other` cells have not been run under this full-split checkpoint.
+
+The first official Sherpa attempt,
+`20260809T195818147535Z-f177d0fa99bc`, is preserved only in the external
+append-only ledger with `status=failed`: 44 of 2,620 inputs were missing after
+four exit-zero, all-empty upstream batches. Its WER is null and it is not in the
+published snapshot. Real-audio reproduction showed that recursive group
+isolation plus the pinned VAD recovered 42 inputs; the remaining two transcribed
+only after lossless balanced segmentation. The committed v4 adapter therefore
+recursively bisects exit-zero empty or malformed groups, retries affected
+singletons with VAD, and uses balanced PCM chunks of at most 10 seconds only if
+VAD is also empty. Every retry process contributes to wall/CPU time, peak RSS,
+and the 378-load count; any nonzero process or empty final fallback still fails
+closed. Unit/smoke checks and a focused 44/44 real-audio replay passed before the
+clean official rerun.
+
+The exact successful aggregate and detail records are published in
+[`benchmarks/published/2026-08-09-librispeech-test-clean-pair`](../benchmarks/published/2026-08-09-librispeech-test-clean-pair/README.md).
+
 ## Nine-alias engineering validation
 
 The table below is a dispatch, model-reuse, scoring, and metrics validation on
@@ -141,13 +177,15 @@ It is resumable only on an exact runtime image, model, dataset, preprocessing,
 adapter, and options fingerprint, and it never reports an overlap-sensitive AMI
 full-meeting WER.
 
-The 18-row subset phase completed and its gate passed. The full-corpus phase
-then started, but was stopped at the user's request before its first summary
-record so these subset results and licensing could be reviewed for public
-release. Consequently this report publishes no purported full-split ranking.
-No successful full-corpus fingerprint exists yet; rerunning the staged suite
-will resume all 18 subset rows and begin the four-finalist full phase from its
-first row. Final-revision paced streaming and AMI runs also remain pending.
+The 18-row subset phase completed and its gate passed on revision `797eb65`.
+The targeted recovery run later completed two of eight full-split cells on the
+v4 adapter at revision `44f2eaf`: Sherpa Parakeet and NeMo Parakeet TDT v3 on
+full `test-clean`. Six full-split cells, final-revision paced streaming, and AMI
+remain pending. The v4 adapter changes the host-adapter fingerprint, so a new
+`just bench-suite staged` run will recompute the older subset cells rather than
+silently treat their v2 records as current. This report consequently publishes
+the subset gate and two-model full checkpoint separately and makes no purported
+four-finalist full-split ranking.
 
 The official Moonshine v0.1.1 Small Streaming component catalog currently
 installs 247,255,694 bytes across eight locked files, rather than the earlier

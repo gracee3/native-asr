@@ -10,11 +10,14 @@ set creates a different benchmark fingerprint.
 Status on 2026-08-09: sections 1-4 are complete on clean benchmark revision
 `797eb65c3216702457b551f9308125203cc2b331`. All 18 deterministic subset rows
 passed with zero failures and are published in
-`docs/reproducibility-report.md`. The full phase was stopped before its first
-summary record to review the public README and license. Resume at section 5;
-the exact staged command will reuse the successful subset fingerprints.
-The portable versions of the operational runners are now available as
-`just bench-full` and `just bench-test-clean-pair`.
+`docs/reproducibility-report.md`. Two section 5 cells also completed on clean
+revision `44f2eafd6a6513617ead992714dab26c120b9bef`: full `test-clean` for
+`sherpa:parakeet-unified-en` and `nemo:parakeet-tdt-v3`, both with 2,620
+utterances and zero failures. The remaining six full-split cells start with the
+other two `test-clean` finalists, followed by all four `test-other` finalists.
+The Sherpa recovery changed the host-adapter fingerprint to v4, so a complete
+`just bench-full` run will recompute the older v2 subset cells. The portable
+operational runners are `just bench-full` and `just bench-test-clean-pair`.
 
 ## Ground rules
 
