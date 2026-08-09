@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ${1:-} == -version ]]; then
+  printf '%s\n' 'ffmpeg version native-asr-test'
+  exit 0
+fi
+
+output=${!#}
+: > "$output"

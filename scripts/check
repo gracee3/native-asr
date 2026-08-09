@@ -22,6 +22,7 @@ awk -F'|' '
 
 ./scripts/models list >/dev/null
 ./tests/sherpa-entrypoint-smoke
+./tests/nemo-entrypoint-smoke
 
 if rg -n -i \
   '(COPY|ADD)[[:space:]].*models|ADD[[:space:]]+https?://|huggingface\.co|releases/download/asr-models|\.(gguf|onnx|nemo|safetensors|pt|pth|bin)([^[:alnum:]_]|$)' \
@@ -30,11 +31,14 @@ if rg -n -i \
   exit 1
 fi
 
-if sed -n '/^FROM .* AS runtime/,$p' docker/sherpa-onnx/Dockerfile | \
-    rg -n -i 'python|pip|pytorch|nemo-toolkit'; then
-  printf '%s\n' 'error: forbidden framework or Python found in final runtime stage' >&2
-  exit 1
-fi
+while IFS= read -r dockerfile; do
+  if sed -n '/^FROM .* AS runtime/,$p' "$dockerfile" | \
+      rg -n -i 'python|pip|pytorch|nemo-toolkit'; then
+    printf 'error: forbidden framework or Python found in final runtime stage: %s\n' \
+      "$dockerfile" >&2
+    exit 1
+  fi
+done < <(find docker -name Dockerfile -type f -print)
 
 git diff --check
 printf '%s\n' 'repository checks: ok'

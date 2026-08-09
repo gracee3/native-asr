@@ -7,8 +7,12 @@ default:
 build-sherpa:
     docker build --file docker/sherpa-onnx/Dockerfile --tag asr-sherpa-onnx .
 
+# Build the portable CPU NVIDIA NeMo-Speech.cpp runtime image.
+build-nemo:
+    docker build --file docker/nemo-speech/Dockerfile --tag asr-nemo-speech .
+
 # Build every currently implemented runtime image.
-build: build-sherpa
+build: build-sherpa build-nemo
 
 # Run host-side syntax, manifest, policy, and wrapper smoke tests.
 check:

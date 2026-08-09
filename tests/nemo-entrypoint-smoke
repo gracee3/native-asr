@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+fixture_bin=$repo_root/tests/fixtures/nemo-bin
+entrypoint=$repo_root/docker/nemo-speech/entrypoint.sh
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-nemo-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+audio=$work/audio.input
+tdt=$work/parakeet-tdt-0.6b-v3.q8_0.gguf
+nemotron=$work/nemotron-speech-streaming-en-0.6b.q8_0.gguf
+nemotron35=$work/nemotron-3.5-asr-streaming-0.6b.q8_0.gguf
+ctc=$work/parakeet-ctc-1.1b.q8_0.gguf
+: > "$audio"
+: > "$tdt"
+: > "$nemotron"
+: > "$nemotron35"
+: > "$ctc"
+
+export PATH="$fixture_bin:$PATH"
+export NEMO_SPEECH_BIN=$fixture_bin/nemo-speech
+
+offline_json=$(
+  "$entrypoint" transcribe --model "$tdt" --format json "$audio"
+)
+jq -e '
+  .runtime == "nemo-speech"
+  and .text == "offline nemo words"
+  and .segmentation == "native-full-utterance"
+  and .model_kind == "parakeet-tdt"
+  and .threads == 4
+' <<< "$offline_json" >/dev/null
+
+streaming_json=$(
+  "$entrypoint" transcribe --model "$nemotron" --format json "$audio"
+)
+jq -e '
+  .text == "streamed nemo words"
+  and .segmentation == "native-streaming-file"
+  and .language_request == "en"
+' <<< "$streaming_json" >/dev/null
+
+multilingual_json=$(
+  "$entrypoint" transcribe \
+    --model "$nemotron35" --format json --language de "$audio"
+)
+jq -e '
+  .text == "streamed nemo words"
+  and .language_request == "de"
+  and .model_kind == "nemotron-3.5-streaming"
+' <<< "$multilingual_json" >/dev/null
+
+text=$(
+  "$entrypoint" transcribe --model "$ctc" --format text "$audio"
+)
+[[ $text == 'offline nemo words' ]]
+
+if "$entrypoint" transcribe --model "$tdt" --threads 8 "$audio" \
+    > "$work/bad-threads.stdout" 2> "$work/bad-threads.stderr"; then
+  printf '%s\n' 'expected unsupported thread count to fail' >&2
+  exit 1
+fi
+grep -Fq 'fixed 4 CPU threads' "$work/bad-threads.stderr"
+
+if "$entrypoint" transcribe --model "$tdt" --stream on "$audio" \
+    > "$work/bad-stream.stdout" 2> "$work/bad-stream.stderr"; then
+  printf '%s\n' 'expected streaming TDT request to fail' >&2
+  exit 1
+fi
+grep -Fq 'not cache-aware' "$work/bad-stream.stderr"
+
+version_output=$(
+  NATIVE_ASR_RUNTIME_VERSION=1.0.0 \
+  NATIVE_ASR_RUNTIME_REVISION=test-revision \
+  NATIVE_ASR_GGML_REVISION=test-ggml \
+  "$entrypoint" version
+)
+grep -Fqx 'native_asr_runtime_version=1.0.0' <<< "$version_output"
+grep -Fqx 'ggml_revision=test-ggml' <<< "$version_output"
+
+printf '%s\n' 'nemo entrypoint smoke: ok'
