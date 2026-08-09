@@ -24,6 +24,11 @@ The stable container model mount is `/models`. Host tooling may mount an audio
 file's parent directory at `/audio` or a working directory at `/work`, but the
 source mount remains read-only.
 
+Host defaults are centralized in `scripts/lib/paths.sh`: `/data/models`,
+`/data/cache/native-asr`, `/data/datasets/native-asr`, and
+`/data/benchmarks/native-asr/runs.jsonl`. Matching environment variables are
+the override mechanism. Docker's global data root is intentionally unchanged.
+
 ## Runtime images
 
 | Image | Native engine | Priority |
@@ -47,6 +52,12 @@ source checkout, Python, PyTorch, or NVIDIA NeMo framework.
 NeMo-Speech.cpp 1.0.0 currently passes a literal four threads to ggml ASR graph
 execution. The host and container wrappers enforce and record four until the
 upstream runtime exposes a real ASR thread control.
+
+The Moonshine image links a repository-owned C++ adapter to the official
+v0.1.1 Linux library release, whose SHA-256 and source revision are pinned. The
+adapter keeps one transcriber alive across batch streams and emits native
+partial/final events. The whisper.cpp image builds `whisper-cli` from v1.9.2
+with GPU backends and host-native code generation disabled.
 
 The default builds target portable modern x86-64 CPUs. They do not use
 `-march=native`. A separately named host-native profile can be added only after

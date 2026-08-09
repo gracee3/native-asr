@@ -2,11 +2,12 @@
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd -- "$script_dir/.." && pwd)
+source "$script_dir/lib/paths.sh"
+repo_root=$NATIVE_ASR_REPO_ROOT
 manifest=${NATIVE_ASR_MODEL_MANIFEST:-$repo_root/manifests/models.lock}
-models_root=${NATIVE_ASR_MODELS:-$repo_root/models}
+models_root=$NATIVE_ASR_MODELS
 container_engine=${NATIVE_ASR_CONTAINER_ENGINE:-docker}
-output_file=${NATIVE_ASR_BENCHMARKS:-$repo_root/benchmarks/runs.jsonl}
+output_file=$NATIVE_ASR_BENCHMARKS
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -44,12 +45,13 @@ dockerfile_arg() {
 }
 
 main() {
-  local threads='' language='' vad=auto stream=auto alias='' audio=''
+  local threads='' threads_explicit=false language='' vad=auto stream=auto alias='' audio=''
   while (($#)); do
     case $1 in
       --threads)
         (($# >= 2)) || die '--threads requires a positive integer'
         threads=$2
+        threads_explicit=true
         shift 2
         ;;
       --language)
@@ -114,6 +116,10 @@ main() {
   local artifact_id locked_alias runtime name source revision filename destination sha license packaging requires notes
   IFS='|' read -r artifact_id locked_alias runtime name source revision filename destination sha license packaging requires notes <<< "$record"
 
+  if [[ $runtime == moonshine && $threads_explicit == true ]]; then
+    die 'Moonshine manages its ONNX Runtime thread pool; --threads is not configurable'
+  fi
+
   if [[ -z $threads ]]; then
     if [[ $runtime == nemo-speech ]]; then
       threads=4
@@ -131,7 +137,7 @@ main() {
     model_size=$(stat -c '%s' -- "$model_path")
   else
     model_size=$(find "$model_path" -type f \
-      \( -name '*.onnx' -o -name '*.gguf' -o -name '*.bin' \) \
+      \( -name '*.onnx' -o -name '*.ort' -o -name '*.gguf' -o -name '*.bin' \) \
       -printf '%s\n' | awk '{ total += $1 } END { print total + 0 }')
     [[ $model_size != 0 ]] || model_size=$(du -sb -- "$model_path" | awk '{print $1}')
   fi
@@ -150,11 +156,25 @@ main() {
       runtime_version=$(dockerfile_arg "$dockerfile" NEMO_SPEECH_VERSION)
       runtime_revision=$(dockerfile_arg "$dockerfile" NEMO_SPEECH_REVISION)
       ;;
+    moonshine)
+      image=asr-moonshine
+      dockerfile=$repo_root/docker/moonshine/Dockerfile
+      runtime_version=$(dockerfile_arg "$dockerfile" MOONSHINE_VERSION)
+      runtime_revision=$(dockerfile_arg "$dockerfile" MOONSHINE_REVISION)
+      ;;
+    whisper-cpp)
+      image=asr-whisper-cpp
+      dockerfile=$repo_root/docker/whisper-cpp/Dockerfile
+      runtime_version=$(dockerfile_arg "$dockerfile" WHISPER_CPP_VERSION)
+      runtime_revision=$(dockerfile_arg "$dockerfile" WHISPER_CPP_REVISION)
+      ;;
     *) die "runtime is locked but not implemented: $runtime" ;;
   esac
   case $filename in
     *q8_0*) quantization=q8_0 ;;
     *int8*) quantization=int8 ;;
+    ggml-small.en.bin) quantization=f16 ;;
+    small-streaming-en-component-tree) quantization=quantized-ort ;;
     *) quantization=unknown ;;
   esac
   engine_version=$($container_engine version --format '{{.Client.Version}}' 2>/dev/null || printf 'unknown')
@@ -170,7 +190,8 @@ main() {
   printf -v work_quoted '%q' "$work"
   trap "rm -rf -- $work_quoted" EXIT
   local result_file=$work/result.json stderr_file=$work/runtime.stderr
-  local -a transcribe_args=(--format json --threads "$threads" --vad "$vad" --stream "$stream")
+  local -a transcribe_args=(--format json --vad "$vad" --stream "$stream")
+  [[ $runtime == moonshine ]] || transcribe_args+=(--threads "$threads")
   [[ -z $language ]] || transcribe_args+=(--language "$language")
   transcribe_args+=("$alias" "$audio_path")
 
@@ -211,10 +232,17 @@ main() {
       <<< "$result_json")
   fi
 
-  local cpu_model logical_cpus created_at stderr_text record_json
+  local cpu_model logical_cpus created_at stderr_text record_json threads_json threads_control
   cpu_model=$(lscpu 2>/dev/null | sed -n 's/^Model name:[[:space:]]*//p' | head -n 1)
   [[ -n $cpu_model ]] || cpu_model=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)
   logical_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 'unknown')
+  if [[ $runtime == moonshine ]]; then
+    threads_json=null
+    threads_control=runtime-managed
+  else
+    threads_json=$threads
+    threads_control=explicit
+  fi
   created_at=$(date --utc --iso-8601=seconds)
   stderr_text=$(sed '/^NATIVE_ASR_TIME\t/d' "$stderr_file")
 
@@ -236,7 +264,8 @@ main() {
     --argjson model_size "$model_size" \
     --arg cpu_model "$cpu_model" \
     --arg logical_cpus "$logical_cpus" \
-    --argjson threads "$threads" \
+    --argjson threads "$threads_json" \
+    --arg threads_control "$threads_control" \
     --arg audio_path "$audio_path" \
     --arg audio_filename "$(basename -- "$audio_path")" \
     --argjson audio_duration "$duration" \
@@ -277,7 +306,8 @@ main() {
         host: {
           cpu: $cpu_model,
           logical_cpus: $logical_cpus,
-          threads: $threads
+          threads: $threads,
+          threads_control: $threads_control
         },
         audio: {
           path: $audio_path,

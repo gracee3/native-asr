@@ -10,6 +10,8 @@ value() {
 
 sherpa=$repo_root/docker/sherpa-onnx/Dockerfile
 nemo=$repo_root/docker/nemo-speech/Dockerfile
+moonshine=$repo_root/docker/moonshine/Dockerfile
+whisper=$repo_root/docker/whisper-cpp/Dockerfile
 
 printf '%-18s %-12s %s\n' RUNTIME VERSION REVISION
 printf '%-18s %-12s %s\n' \
@@ -26,3 +28,9 @@ printf '%-18s %-12s %s\n' \
   "$(value "$nemo" NEMO_SPEECH_REVISION)"
 printf '%-18s %-12s %s\n' \
   ggml submodule "$(value "$nemo" GGML_REVISION)"
+printf '%-18s %-12s %s\n' \
+  moonshine "$(value "$moonshine" MOONSHINE_VERSION)" \
+  "$(value "$moonshine" MOONSHINE_REVISION)"
+printf '%-18s %-12s %s\n' \
+  whisper.cpp "$(value "$whisper" WHISPER_CPP_VERSION)" \
+  "$(value "$whisper" WHISPER_CPP_REVISION)"

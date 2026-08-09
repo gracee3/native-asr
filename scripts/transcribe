@@ -2,9 +2,10 @@
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd -- "$script_dir/.." && pwd)
+source "$script_dir/lib/paths.sh"
+repo_root=$NATIVE_ASR_REPO_ROOT
 manifest=${NATIVE_ASR_MODEL_MANIFEST:-$repo_root/manifests/models.lock}
-models_root=${NATIVE_ASR_MODELS:-$repo_root/models}
+models_root=$NATIVE_ASR_MODELS
 container_engine=${NATIVE_ASR_CONTAINER_ENGINE:-docker}
 
 die() {
@@ -22,8 +23,8 @@ Options:
   --format text|txt|json   output format (default: text)
   --language CODE          model language code or prompt
   --output PATH            write output atomically instead of stdout
-  --vad auto|on|none       sherpa long-form VAD mode (default: auto)
-  --stream auto|on|none    NeMo stateful file mode (default: auto)
+  --vad auto|on|none       long-form VAD mode (default: auto)
+  --stream auto|on|none    stateful file mode (default: auto)
 
 The selected model is verified before Docker starts. The container always runs
 with networking disabled and read-only model/audio mounts.
@@ -154,6 +155,17 @@ main() {
       runtime_wrapper=/usr/local/bin/native-asr-nemo
       [[ $vad == auto ]] || die '--vad is only configurable for sherpa-onnx models'
       ;;
+    moonshine)
+      image=asr-moonshine
+      runtime_wrapper=/usr/local/bin/native-asr-moonshine
+      [[ $vad == auto ]] || die '--vad is not configurable for Moonshine models'
+      [[ -z $threads ]] || die 'Moonshine manages its ONNX Runtime thread pool; --threads is not configurable'
+      ;;
+    whisper-cpp)
+      image=asr-whisper-cpp
+      runtime_wrapper=/usr/local/bin/native-asr-whisper
+      [[ $stream == auto ]] || die '--stream is not configurable for whisper.cpp models'
+      ;;
     *) die "runtime is locked but not implemented: $runtime" ;;
   esac
   [[ $runtime_root != *','* && $audio_dir != *','* ]] || \
@@ -166,16 +178,16 @@ main() {
   )
   [[ -z $threads ]] || runtime_args+=(--threads "$threads")
   [[ -z $language ]] || runtime_args+=(--language "$language")
-  if [[ $runtime == sherpa-onnx ]]; then
-    runtime_args+=(--vad "$vad")
-  else
-    runtime_args+=(--stream "$stream")
-  fi
+  case $runtime in
+    sherpa-onnx|whisper-cpp) runtime_args+=(--vad "$vad") ;;
+    nemo-speech|moonshine) runtime_args+=(--stream "$stream") ;;
+  esac
   runtime_args+=("/audio/$audio_name")
 
   local -a command=(
     "$container_engine" run --rm
     --network none
+    --user "$(id -u):$(id -g)"
     --mount "type=bind,source=$runtime_root,target=/models,readonly"
     --mount "type=bind,source=$audio_dir,target=/audio,readonly"
   )

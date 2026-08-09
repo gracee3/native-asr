@@ -8,13 +8,18 @@ trap 'rm -rf -- "$work"' EXIT
 models=$work/models
 manifest=$work/models.lock
 audio_dir=$work/audio
-mkdir -p "$models/nemo-speech/parakeet-tdt-v3" "$models/sherpa-onnx" "$audio_dir"
+mkdir -p "$models/nemo-speech/parakeet-tdt-v3" "$models/sherpa-onnx" \
+  "$models/moonshine" "$models/whisper-cpp" "$audio_dir"
 : > "$models/nemo-speech/parakeet-tdt-v3/parakeet-tdt-0.6b-v3.q8_0.gguf"
 : > "$models/sherpa-onnx/canary-model"
+: > "$models/moonshine/small-streaming-model"
+: > "$models/whisper-cpp/ggml-small.en.bin"
 : > "$audio_dir/input.wav"
 cat > "$manifest" <<'EOF'
 nemo-test|nemo:parakeet-tdt-v3|nemo-speech|Test NeMo|https://invalid.example/model|test-revision|parakeet-tdt-0.6b-v3.q8_0.gguf|nemo-speech/parakeet-tdt-v3/parakeet-tdt-0.6b-v3.q8_0.gguf|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|CC-BY-4.0|file||test
 sherpa-test|sherpa:canary-180m-flash|sherpa-onnx|Test Sherpa|https://invalid.example/model|test-revision|canary-model|sherpa-onnx/canary-model|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|CC-BY-4.0|file||test
+moonshine-test|moonshine:small-streaming-en|moonshine|Test Moonshine|https://invalid.example/model|test-revision|small-streaming-model|moonshine/small-streaming-model|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|MIT|file||test
+whisper-test|whisper:small.en|whisper-cpp|Test Whisper|https://invalid.example/model|test-revision|ggml-small.en.bin|whisper-cpp/ggml-small.en.bin|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|MIT|file||test
 EOF
 
 export PATH="$repo_root/tests/fixtures/dispatch-bin:$PATH"
@@ -37,6 +42,8 @@ jq -e \
   ' <<< "$json" >/dev/null
 grep -Fqx -- '--network' "$work/docker.log"
 grep -Fqx -- 'none' "$work/docker.log"
+grep -Fqx -- '--user' "$work/docker.log"
+grep -Fqx -- "$(id -u):$(id -g)" "$work/docker.log"
 grep -Fqx \
   "type=bind,source=$models/nemo-speech,target=/models,readonly" \
   "$work/docker.log"
@@ -50,6 +57,14 @@ output=$work/transcript.txt
   sherpa:canary-180m-flash "$audio_dir/input.wav"
 [[ $(< "$output") == 'common dispatcher words' ]]
 grep -Fqx 'asr-sherpa-onnx' "$work/docker.log"
+grep -Fqx -- '--vad' "$work/docker.log"
+
+"$repo_root/scripts/transcribe" moonshine:small-streaming-en "$audio_dir/input.wav" >/dev/null
+grep -Fqx 'asr-moonshine' "$work/docker.log"
+grep -Fqx -- '--stream' "$work/docker.log"
+
+"$repo_root/scripts/transcribe" whisper:small.en "$audio_dir/input.wav" >/dev/null
+grep -Fqx 'asr-whisper-cpp' "$work/docker.log"
 grep -Fqx -- '--vad' "$work/docker.log"
 
 if "$repo_root/scripts/transcribe" --vad on \

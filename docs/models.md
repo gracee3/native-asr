@@ -1,6 +1,6 @@
 # Model management
 
-Model weights live under `${NATIVE_ASR_MODELS:-./models}` and never in a Docker
+Model weights live under `${NATIVE_ASR_MODELS:-/data/models}` and never in a Docker
 image. The committed source of truth is `manifests/models.lock`.
 
 ## Lockfile schema
@@ -29,7 +29,9 @@ model bundles come from its long-lived `asr-models` release; their exact GitHub
 asset timestamps and SHA-256 digests are locked because that release tag is not
 an immutable content address.
 
-`packaging` is currently either `file` or `tar.bz2`. `requires` is a
+`packaging` is `file`, `tar.bz2`, or `tree`. Multi-file trees have one locked
+row per component in `manifests/model-components.lock`, plus an aggregate digest
+over the installed per-file inventory. `requires` is a
 comma-delimited list of model aliases, used initially for the shared Silero VAD
 artifact.
 
@@ -46,8 +48,9 @@ The host downloader:
 7. atomically renames the verified result to its destination;
 8. refuses to overwrite an invalid existing destination.
 
-Archive receipts allow `just verify-models` to verify extracted files without
-network access or retaining a second copy of a large compressed bundle.
+Tree receipts allow `just verify-models` to verify extracted/component files
+without network access. Verified compressed archives remain in the external
+project cache for reinstall without another download.
 
 ## On-disk layout
 
@@ -58,11 +61,15 @@ models/
 │   ├── parakeet-unified-en-0.6b-int8/
 │   ├── canary-180m-flash-int8/
 │   └── nemotron-streaming-en-560ms-int8/
-└── nemo-speech/
+├── nemo-speech/
     ├── parakeet-tdt-v3/*.gguf
     ├── nemotron-streaming-en/*.gguf
     ├── nemotron-3.5-streaming/*.gguf
-    └── parakeet-ctc-1.1b/*.gguf
+│   └── parakeet-ctc-1.1b/*.gguf
+├── moonshine/small-streaming-en/*.ort
+└── whisper-cpp/
+    ├── _shared/ggml-silero-v6.2.0.bin
+    └── small.en/ggml-small.en.bin
 ```
 
 Do not move downloaded files into `docker/` or any other build-context path.

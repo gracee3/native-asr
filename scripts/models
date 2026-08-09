@@ -244,6 +244,7 @@ fetch_record() {
       fi
       local staged=$dest.stage.$$
       cp --reflink=auto -- "$cached" "$staged"
+      chmod a+r "$staged"
       mv -- "$staged" "$dest"
       printf 'installed: %s -> %s\n' "$alias" "$dest"
       ;;

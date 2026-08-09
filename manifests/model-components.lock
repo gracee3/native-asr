@@ -1,0 +1,10 @@
+# native-asr multi-file model component lock, schema 1
+# artifact_id|relative_path|source|revision|size|sha256
+moonshine-small-streaming-en-quantized-2026-07-30|adapter.ort|https://download.moonshine.ai/model/small-streaming-en/quantized_26_07_30/adapter.ort|quantized_26_07_30|2870368|c665f742364febad597cc9ac1e0b341ffbee0e24a1466e2f3bde95e6e4771762
+moonshine-small-streaming-en-quantized-2026-07-30|cross_kv.ort|https://download.moonshine.ai/model/small-streaming-en/quantized_26_07_30/cross_kv.ort|quantized_26_07_30|5356536|e2d3417144e9514055ebfefe8dcc4c0a55a55adcb8530435844c75c53e352bf6
+moonshine-small-streaming-en-quantized-2026-07-30|decoder_kv.ort|https://download.moonshine.ai/model/small-streaming-en/quantized_26_07_30/decoder_kv.ort|quantized_26_07_30|81878600|1a05465b1dd955858dfcbee039c0020fb5dd982b0f5094c34e61735d518d771b
+moonshine-small-streaming-en-quantized-2026-07-30|decoder_kv_with_attention.ort|https://download.moonshine.ai/model/small-streaming-en/quantized_26_07_30/decoder_kv_with_attention.ort|quantized_26_07_30|81766608|19653ca93362cd0445837cbaabc9f36f462410b357dd4a102d9c8ca1c3d13c8c
+moonshine-small-streaming-en-quantized-2026-07-30|encoder.ort|https://download.moonshine.ai/model/small-streaming-en/quantized_26_07_30/encoder.ort|quantized_26_07_30|44148576|2d4d973e91e8aca08c51e7e7efa28a46ab265b63d809d5294d18b86bcd85b993
+moonshine-small-streaming-en-quantized-2026-07-30|frontend.ort|https://download.moonshine.ai/model/small-streaming-en/quantized_26_07_30/frontend.ort|quantized_26_07_30|30984520|d1be8145bc9ef3e8625bb7bcb7a5b2930eeb828c91d6c1897bc215d7de6f2b93
+moonshine-small-streaming-en-quantized-2026-07-30|streaming_config.json|https://download.moonshine.ai/model/small-streaming-en/quantized_26_07_30/streaming_config.json|quantized_26_07_30|512|26f02b6afb22d60871a5efd85c3d38e569cc0ddb6c5eb6e93d3260152ae8a47a
+moonshine-small-streaming-en-quantized-2026-07-30|tokenizer.bin|https://download.moonshine.ai/model/small-streaming-en/quantized_26_07_30/tokenizer.bin|quantized_26_07_30|249974|6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d
