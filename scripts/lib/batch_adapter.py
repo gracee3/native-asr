@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import wave
 
 
 @dataclass
@@ -29,13 +31,16 @@ class BatchResult:
 SHERPA_PARAKEET_MAX_FILES = 16
 SHERPA_PARAKEET_MAX_AUDIO_SECONDS = 90.0
 SHERPA_PARAKEET_LONG_AUDIO_SECONDS = 20.0
+SHERPA_PARAKEET_FALLBACK_CHUNK_SECONDS = 10.0
 
 
 def batch_policy(record: dict[str, str]) -> str:
     if record["alias"] == "sherpa:parakeet-unified-en":
         return (f"bounded-{SHERPA_PARAKEET_MAX_FILES}-files-"
                 f"{SHERPA_PARAKEET_MAX_AUDIO_SECONDS:g}-audio-seconds-"
-                f"vad-over-{SHERPA_PARAKEET_LONG_AUDIO_SECONDS:g}-seconds-v2")
+                f"vad-over-{SHERPA_PARAKEET_LONG_AUDIO_SECONDS:g}-seconds-"
+                "recursive-empty-split-vad-singleton-"
+                f"fixed-{SHERPA_PARAKEET_FALLBACK_CHUNK_SECONDS:g}-second-chunks-v4")
     if record["alias"] == "nemo:parakeet-ctc-1.1b":
         return "runtime-native-json-minus-nan-confidence-null-v2"
     return "runtime-native-v1"
@@ -224,6 +229,35 @@ def _sherpa_parakeet_groups(files: list[Path], utterances: list[dict]) \
     return groups
 
 
+def _sherpa_parakeet_chunks(file: Path) -> list[Path]:
+    """Split one pathological empty input into balanced, lossless PCM chunks."""
+    with wave.open(str(file), "rb") as source:
+        channels = source.getnchannels()
+        sample_width = source.getsampwidth()
+        sample_rate = source.getframerate()
+        compression = (source.getcomptype(), source.getcompname())
+        frame_count = source.getnframes()
+        chunk_count = max(
+            2,
+            math.ceil(frame_count / (sample_rate * SHERPA_PARAKEET_FALLBACK_CHUNK_SECONDS)),
+        )
+        frames_per_chunk = math.ceil(frame_count / chunk_count)
+        chunks = []
+        for index in range(chunk_count):
+            frames = source.readframes(frames_per_chunk)
+            if not frames:
+                break
+            chunk = file.with_name(f"{file.stem}.fixed-{index:02d}.wav")
+            with wave.open(str(chunk), "wb") as destination:
+                destination.setnchannels(channels)
+                destination.setsampwidth(sample_width)
+                destination.setframerate(sample_rate)
+                destination.setcomptype(*compression)
+                destination.writeframes(frames)
+            chunks.append(chunk)
+    return chunks
+
+
 def run_batch(record: dict[str, str], utterances: list[dict], models: Path,
               cache: Path, threads: int) -> BatchResult:
     batch_root = cache / "bench-batch"
@@ -243,60 +277,119 @@ def run_batch(record: dict[str, str], utterances: list[dict], models: Path,
         base = _container_base(record["runtime"], models, input_dir, output_dir)
         groups = ([(files, False)] if record["alias"] != "sherpa:parakeet-unified-en" else
                   _sherpa_parakeet_groups(files, utterances))
-        commands = []
-        for group, use_vad in groups:
-            if use_vad:
-                commands.append(_sherpa_parakeet_vad(record, group[0], threads, base))
-            else:
-                commands.append({
-                    "sherpa-onnx": lambda: _sherpa(record, group, threads, base),
-                    "nemo-speech": lambda: _nemo(record, base),
-                    "moonshine": lambda: _moonshine(record, group, base),
-                    "whisper-cpp": lambda: _whisper(record, group, threads, base),
-                }[record["runtime"]]())
         started = time.monotonic()
-        processes = [subprocess.run(command, text=True, capture_output=True)
-                     for command in commands]
-        wall = time.monotonic() - started
+        processes: list[subprocess.CompletedProcess[str]] = []
         hypotheses: dict[str, str] = {}
         failures: dict[str, str] = {}
-        timing = [_timing(process.stderr) for process in processes]
-        user_seconds = (sum(row[0] for row in timing if row[0] is not None)
-                        if all(row[0] is not None for row in timing) else None)
-        system_seconds = (sum(row[1] for row in timing if row[1] is not None)
-                          if all(row[1] is not None for row in timing) else None)
-        peaks = [row[2] for row in timing if row[2] is not None]
-        peak_rss_kb = max(peaks) if len(peaks) == len(timing) else None
-        for (group, use_vad), process in zip(groups, processes, strict=True):
-            if use_vad:
-                hypotheses[group[0].stem] = _sherpa_vad_text(process.stdout)
-            elif record["runtime"] in ("sherpa-onnx", "moonshine"):
+
+        if record["alias"] == "sherpa:parakeet-unified-en":
+            def execute_fixed_chunks(file: Path) -> None:
+                chunk_texts = []
+                for chunk in _sherpa_parakeet_chunks(file):
+                    process = subprocess.run(
+                        _sherpa(record, [chunk], threads, base),
+                        text=True, capture_output=True,
+                    )
+                    processes.append(process)
+                    if process.returncode != 0:
+                        failures[file.stem] = (process.stderr[-4000:] or
+                                               f"batch runtime exited {process.returncode}")
+                        return
+                    payloads = []
+                    for line in process.stdout.splitlines():
+                        try:
+                            payloads.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+                    if len(payloads) != 1:
+                        failures[file.stem] = (
+                            "sherpa parakeet fixed-chunk fallback returned an invalid "
+                            f"payload count under policy {batch_policy(record)}"
+                        )
+                        return
+                    text = _json_text(payloads[0]).strip()
+                    if text:
+                        chunk_texts.append(text)
+                if chunk_texts:
+                    hypotheses[file.stem] = " ".join(chunk_texts)
+                else:
+                    failures[file.stem] = (
+                        "sherpa parakeet fixed-chunk fallback returned only empty "
+                        f"hypotheses under policy {batch_policy(record)}"
+                    )
+
+            def execute_parakeet(group: list[Path], use_vad: bool) -> None:
+                command = (_sherpa_parakeet_vad(record, group[0], threads, base)
+                           if use_vad else _sherpa(record, group, threads, base))
+                process = subprocess.run(command, text=True, capture_output=True)
+                processes.append(process)
+                if process.returncode != 0:
+                    message = (process.stderr[-4000:] or
+                               f"batch runtime exited {process.returncode}")
+                    failures.update({file.stem: message for file in group})
+                    return
+                if use_vad:
+                    text = _sherpa_vad_text(process.stdout)
+                    if text.strip():
+                        hypotheses[group[0].stem] = text
+                    else:
+                        execute_fixed_chunks(group[0])
+                    return
+
                 payloads = []
-                payload_source = (process.stderr
-                                  if record["alias"] == "sherpa:nemotron-streaming-en"
-                                  else process.stdout)
-                for line in payload_source.splitlines():
+                for line in process.stdout.splitlines():
                     try:
                         payloads.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
-                for file, payload in zip(group, payloads, strict=False):
-                    hypotheses[file.stem] = _json_text(payload)
-            # Sherpa and Moonshine emit hypotheses on their captured streams,
-            # so they can be validated here. NeMo and Whisper write JSON files
-            # under /output; validate those only after loading that directory
-            # below.
-            if record["runtime"] in ("sherpa-onnx", "moonshine"):
+                texts = [_json_text(payload) for payload in payloads]
+                if len(texts) != len(group) or all(not text.strip() for text in texts):
+                    if len(group) == 1:
+                        execute_parakeet(group, True)
+                    else:
+                        midpoint = len(group) // 2
+                        execute_parakeet(group[:midpoint], False)
+                        execute_parakeet(group[midpoint:], False)
+                    return
+                for file, text in zip(group, texts, strict=True):
+                    if text.strip():
+                        hypotheses[file.stem] = text
+                    else:
+                        execute_parakeet([file], True)
+
+            for group, use_vad in groups:
+                execute_parakeet(group, use_vad)
+        else:
+            commands = [{
+                "sherpa-onnx": lambda: _sherpa(record, group, threads, base),
+                "nemo-speech": lambda: _nemo(record, base),
+                "moonshine": lambda: _moonshine(record, group, base),
+                "whisper-cpp": lambda: _whisper(record, group, threads, base),
+            }[record["runtime"]]() for group, _ in groups]
+            processes = [subprocess.run(command, text=True, capture_output=True)
+                         for command in commands]
+            for (group, _), process in zip(groups, processes, strict=True):
+                if record["runtime"] in ("sherpa-onnx", "moonshine"):
+                    payloads = []
+                    payload_source = (process.stderr
+                                      if record["alias"] == "sherpa:nemotron-streaming-en"
+                                      else process.stdout)
+                    for line in payload_source.splitlines():
+                        try:
+                            payloads.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+                    for file, payload in zip(group, payloads, strict=False):
+                        hypotheses[file.stem] = _json_text(payload)
+                # Sherpa and Moonshine emit hypotheses on their captured
+                # streams. NeMo and Whisper write JSON under /output and are
+                # validated after loading that directory below.
+                if record["runtime"] not in ("sherpa-onnx", "moonshine"):
+                    continue
                 for file in group:
                     if process.returncode != 0 or file.stem not in hypotheses:
                         failures[file.stem] = (process.stderr[-4000:] or
                                                f"batch runtime exited {process.returncode}")
-            if (record["alias"] == "sherpa:parakeet-unified-en" and group and
-                    all(file.stem in hypotheses and not hypotheses[file.stem].strip()
-                        for file in group)):
-                message = ("sherpa parakeet batch returned only empty hypotheses "
-                           f"for {len(group)} inputs under policy {batch_policy(record)}")
-                failures.update({file.stem: message for file in group})
         if record["runtime"] not in ("sherpa-onnx", "moonshine"):
             for output in output_dir.rglob("*.json"):
                 hypotheses[output.stem] = _json_text(_runtime_json_payload(output))
@@ -305,6 +398,14 @@ def run_batch(record: dict[str, str], utterances: list[dict], models: Path,
                 if process.returncode != 0 or file.stem not in hypotheses:
                     failures[file.stem] = (process.stderr[-4000:] or
                                            f"batch runtime exited {process.returncode}")
+        wall = time.monotonic() - started
+        timing = [_timing(process.stderr) for process in processes]
+        user_seconds = (sum(row[0] for row in timing if row[0] is not None)
+                        if all(row[0] is not None for row in timing) else None)
+        system_seconds = (sum(row[1] for row in timing if row[1] is not None)
+                          if all(row[1] is not None for row in timing) else None)
+        peaks = [row[2] for row in timing if row[2] is not None]
+        peak_rss_kb = max(peaks) if len(peaks) == len(timing) else None
         stderr = "\n".join(process.stderr for process in processes)
         return BatchResult(hypotheses, failures, wall, user_seconds, system_seconds,
                            peak_rss_kb, len(processes), stderr[-16000:])

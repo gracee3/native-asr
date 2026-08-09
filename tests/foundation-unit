@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tarfile
 import tempfile
+import wave
 
 import batch_adapter
 import benchmark_set
@@ -143,8 +144,14 @@ with tempfile.TemporaryDirectory() as raw:
     # Parakeet's pinned CLI silently emits empty hypotheses for a large
     # concurrent stream set. The adapter uses bounded, fingerprinted groups and
     # aggregates their timing while retaining every utterance mapping.
+    parakeet_prepared = root / "parakeet.wav"
+    with wave.open(str(parakeet_prepared), "wb") as fixture:
+        fixture.setnchannels(1)
+        fixture.setsampwidth(2)
+        fixture.setframerate(16000)
+        fixture.writeframes(b"\0\0" * 16000)
     parakeet_rows = [
-        {"utterance_id": f"p{index}", "prepared_path": str(prepared),
+        {"utterance_id": f"p{index}", "prepared_path": str(parakeet_prepared),
          "duration_seconds": 1.0}
         for index in range(19)
     ]
@@ -175,30 +182,82 @@ with tempfile.TemporaryDirectory() as raw:
     long_groups = batch_adapter._sherpa_parakeet_groups(
         [Path(f"p{index}.wav") for index in range(3)],
         [*parakeet_rows[:2],
-         {"utterance_id": "long", "prepared_path": str(prepared),
+         {"utterance_id": "long", "prepared_path": str(parakeet_prepared),
           "duration_seconds": 20.1}],
     )
     assert [(len(group), use_vad) for group, use_vad in long_groups] == [(2, False), (1, True)]
 
-    # A successful process with only empty Parakeet payloads is a runtime
-    # failure, not a valid 100% deletion WER result.
-    def fake_empty_parakeet(command, **kwargs):
-        audio = [item for item in command if item.startswith("/audio/")]
+    # An exit-zero all-empty group is split recursively. An empty raw
+    # singleton is retried through VAD, while unaffected siblings retain their
+    # raw offline hypotheses. Every retry remains inside measured batch time.
+    calls = []
+    def fake_retry_parakeet(command, **kwargs):
+        calls.append(command)
+        audio = [Path(item).stem for item in command if item.startswith("/audio/")]
+        if any("vad-with-offline-asr" in item for item in command):
+            return SimpleNamespace(
+                stdout="0.10 -- 1.20: recovered by vad\n",
+                stderr="NATIVE_ASR_TIME\t1.0\t0.5\t8192\t0\n", returncode=0,
+            )
+        texts = ([""] * len(audio) if len(audio) > 1 or audio == ["p0"] else audio)
         return SimpleNamespace(
-            stdout="".join('{"text":""}\n' for _ in audio),
+            stdout="".join(json.dumps({"text": text}) + "\n" for text in texts),
             stderr="NATIVE_ASR_TIME\t1.0\t0.5\t8192\t0\n", returncode=0,
         )
-    batch_adapter.subprocess.run = fake_empty_parakeet
+    batch_adapter.subprocess.run = fake_retry_parakeet
     try:
-        empty = batch_adapter.run_batch(
+        retried = batch_adapter.run_batch(
             {"runtime": "sherpa-onnx", "destination": "sherpa-onnx/parakeet",
              "alias": "sherpa:parakeet-unified-en"},
             parakeet_rows[:2], root / "models", root / "cache", 8,
         )
     finally:
         batch_adapter.subprocess.run = original_run
-    assert set(empty.failures) == {"p0", "p1"}
-    assert all("only empty hypotheses" in message for message in empty.failures.values())
+    assert retried.hypotheses == {"p0": "recovered by vad", "p1": "p1"}
+    assert not retried.failures and retried.model_loads == 4
+    assert retried.user_seconds == 4.0 and retried.peak_rss_kb == 8192
+
+    # A singleton that is still empty after VAD is split into balanced PCM
+    # chunks. Nonempty chunk transcripts are joined under the original ID.
+    def fake_chunked_parakeet(command, **kwargs):
+        audio = [Path(item).stem for item in command if item.startswith("/audio/")]
+        is_vad = any("vad-with-offline-asr" in item for item in command)
+        texts = ([""] if is_vad or audio == ["p0"] else audio)
+        return SimpleNamespace(
+            stdout=("" if is_vad else
+                    "".join(json.dumps({"text": text}) + "\n" for text in texts)),
+            stderr="NATIVE_ASR_TIME\t1.0\t0.5\t8192\t0\n", returncode=0,
+        )
+    batch_adapter.subprocess.run = fake_chunked_parakeet
+    try:
+        chunked = batch_adapter.run_batch(
+            {"runtime": "sherpa-onnx", "destination": "sherpa-onnx/parakeet",
+             "alias": "sherpa:parakeet-unified-en"},
+            parakeet_rows[:1], root / "models", root / "cache", 8,
+        )
+    finally:
+        batch_adapter.subprocess.run = original_run
+    assert chunked.hypotheses == {"p0": "p0.fixed-00 p0.fixed-01"}
+    assert not chunked.failures and chunked.model_loads == 4
+
+    # If fixed chunks are also empty, the utterance remains a failure.
+    def fake_unrecoverable_parakeet(command, **kwargs):
+        is_vad = any("vad-with-offline-asr" in item for item in command)
+        return SimpleNamespace(
+            stdout="" if is_vad else '{"text":""}\n',
+            stderr="NATIVE_ASR_TIME\t1.0\t0.5\t8192\t0\n", returncode=0,
+        )
+    batch_adapter.subprocess.run = fake_unrecoverable_parakeet
+    try:
+        unrecoverable = batch_adapter.run_batch(
+            {"runtime": "sherpa-onnx", "destination": "sherpa-onnx/parakeet",
+             "alias": "sherpa:parakeet-unified-en"},
+            parakeet_rows[:1], root / "models", root / "cache", 8,
+        )
+    finally:
+        batch_adapter.subprocess.run = original_run
+    assert set(unrecoverable.failures) == {"p0"}
+    assert "fixed-chunk fallback returned only empty" in unrecoverable.failures["p0"]
 
     # A nonzero batch process is never upgraded to success merely because it
     # emitted parseable partial output before failing.
