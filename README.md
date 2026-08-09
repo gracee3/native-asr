@@ -15,14 +15,13 @@ explicit host-side operation, model directories are mounted read-only at
 
 ## Status
 
-The repository foundation and reproducible model lockfile are in place. The
-runtime images and common transcription interface are being implemented in this
-order:
+The repository foundation, reproducible model lockfile, and sherpa-onnx runtime
+image are in place. The remaining runtime and common interface work proceeds in
+this order:
 
-1. sherpa-onnx;
-2. NeMo-Speech.cpp;
-3. common transcription and benchmark harness;
-4. Moonshine and whisper.cpp.
+1. NeMo-Speech.cpp;
+2. common transcription and benchmark harness;
+3. Moonshine and whisper.cpp.
 
 ## Architecture
 
@@ -82,7 +81,34 @@ just verify-models sherpa:parakeet-unified-en
 The first form verifies everything currently installed and reports models that
 have not been installed. The second requires and verifies the named model.
 
-## Intended transcription interface
+## Sherpa transcription
+
+Build the pinned sherpa-onnx 1.13.2 / ONNX Runtime 1.24.4 CPU image and fetch a
+model:
+
+```bash
+just build-sherpa
+just model sherpa:canary-180m-flash
+```
+
+Run inference with no container network and read-only model/audio mounts:
+
+```bash
+docker run --rm --network none \
+  -v "${NATIVE_ASR_MODELS:-$PWD/models}/sherpa-onnx:/models:ro" \
+  -v "$PWD:/work:ro" \
+  asr-sherpa-onnx \
+  transcribe \
+  --model /models/canary-180m-flash-int8 \
+  --format json \
+  /work/recording.m4a
+```
+
+The image normalizes common media formats with FFmpeg, defaults offline models
+to the shared Silero VAD when installed, and emits text or compact JSON. The
+Nemotron model uses Sherpa's true stateful streaming decoder for file input.
+
+## Intended common interface
 
 The common interface will be:
 
@@ -92,7 +118,7 @@ just model sherpa:parakeet-unified-en
 just transcribe sherpa:parakeet-unified-en recording.m4a
 ```
 
-Its equivalent Docker boundary is deliberately explicit:
+Its Docker boundary remains deliberately explicit:
 
 ```bash
 docker run --rm --network none \

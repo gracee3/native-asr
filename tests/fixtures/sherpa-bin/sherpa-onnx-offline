@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' '{"text":"offline words","timestamps":[],"tokens":["offline"," words"]}'

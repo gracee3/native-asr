@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' 'fake streaming diagnostics' >&2
+printf '%s\n' '{"text":"streamed words","timestamps":[0.0,0.5],"tokens":["streamed"," words"]}' >&2

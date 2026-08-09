@@ -33,6 +33,11 @@ source mount remains read-only.
 | `asr-moonshine` | Moonshine native C++ runtime | 3 |
 | `asr-whisper-cpp` | ggml-org/whisper.cpp | 3 |
 
+The Sherpa image links its selected native executables to the pinned shared
+ONNX Runtime library. This avoids a verified allocator failure seen with the
+same release's static ONNX Runtime archive while keeping compilers, headers,
+and source trees out of the final stage.
+
 The default builds target portable modern x86-64 CPUs. They do not use
 `-march=native`. A separately named host-native profile can be added only after
 portable behavior and benchmark comparability are established.

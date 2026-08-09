@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+fixture_bin=$repo_root/tests/fixtures/sherpa-bin
+entrypoint=$repo_root/docker/sherpa-onnx/entrypoint.sh
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-sherpa-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+models=$work/models
+audio=$work/audio.input
+mkdir -p \
+  "$models/_shared" \
+  "$models/parakeet-unified-en-0.6b-int8" \
+  "$models/canary-180m-flash-int8" \
+  "$models/nemotron-streaming-en-560ms-int8"
+: > "$audio"
+: > "$models/_shared/silero_vad.onnx"
+
+for file in encoder.int8.onnx decoder.int8.onnx joiner.int8.onnx tokens.txt; do
+  : > "$models/parakeet-unified-en-0.6b-int8/$file"
+  : > "$models/nemotron-streaming-en-560ms-int8/$file"
+done
+for file in encoder.int8.onnx decoder.int8.onnx tokens.txt; do
+  : > "$models/canary-180m-flash-int8/$file"
+done
+
+export PATH="$fixture_bin:$PATH"
+export SHERPA_BIN_DIR=$fixture_bin
+
+vad_json=$(
+  "$entrypoint" transcribe \
+    --model "$models/parakeet-unified-en-0.6b-int8" \
+    --format json --vad on "$audio"
+)
+jq -e '
+  .runtime == "sherpa-onnx"
+  and .segmentation == "silero-vad"
+  and .text == "first segment second segment"
+  and (.segments | length) == 2
+  and .segments[0].start == 0.1
+' <<< "$vad_json" >/dev/null
+
+offline_json=$(
+  "$entrypoint" transcribe \
+    --model "$models/canary-180m-flash-int8" \
+    --format json --vad none --language es "$audio"
+)
+jq -e '
+  .text == "offline words"
+  and .language == "es"
+  and .segmentation == "none"
+' <<< "$offline_json" >/dev/null
+
+streaming_json=$(
+  "$entrypoint" transcribe \
+    --model "$models/nemotron-streaming-en-560ms-int8" \
+    --format json "$audio"
+)
+jq -e '
+  .text == "streamed words"
+  and .segmentation == "native-streaming-file"
+' <<< "$streaming_json" >/dev/null
+
+text=$(
+  "$entrypoint" transcribe \
+    --model "$models/canary-180m-flash-int8" \
+    --format text --vad none "$audio"
+)
+[[ $text == 'offline words' ]]
+
+version_output=$(
+  NATIVE_ASR_RUNTIME_VERSION=1.13.2 \
+  NATIVE_ASR_RUNTIME_REVISION=test-revision \
+  NATIVE_ASR_ONNXRUNTIME_VERSION=1.24.4 \
+  "$entrypoint" version
+)
+grep -Fqx 'native_asr_runtime_version=1.13.2' <<< "$version_output"
+grep -Fqx 'onnxruntime_version=1.24.4' <<< "$version_output"
+
+printf '%s\n' 'sherpa entrypoint smoke: ok'

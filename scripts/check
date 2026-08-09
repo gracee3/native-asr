@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd -- "$repo_root"
+
+mapfile -t shell_files < <(
+  find scripts tests docker -type f \
+    ! -name Dockerfile \
+    -exec awk 'FNR == 1 && $0 ~ /^#!.*(ba)?sh/ { print FILENAME }' {} +
+)
+bash -n "${shell_files[@]}"
+
+awk -F'|' '
+  BEGIN { ok=1 }
+  !/^#/ && NF && NF != 13 {
+    print FNR ": expected 13 model-lock fields, got " NF > "/dev/stderr"
+    ok=0
+  }
+  END { exit !ok }
+' manifests/models.lock
+
+./scripts/models list >/dev/null
+./tests/sherpa-entrypoint-smoke
+
+if rg -n -i \
+  '(COPY|ADD)[[:space:]].*models|ADD[[:space:]]+https?://|huggingface\.co|releases/download/asr-models|\.(gguf|onnx|nemo|safetensors|pt|pth|bin)([^[:alnum:]_]|$)' \
+  docker -g Dockerfile; then
+  printf '%s\n' 'error: Dockerfile appears to include a model source or artifact' >&2
+  exit 1
+fi
+
+if sed -n '/^FROM .* AS runtime/,$p' docker/sherpa-onnx/Dockerfile | \
+    rg -n -i 'python|pip|pytorch|nemo-toolkit'; then
+  printf '%s\n' 'error: forbidden framework or Python found in final runtime stage' >&2
+  exit 1
+fi
+
+git diff --check
+printf '%s\n' 'repository checks: ok'

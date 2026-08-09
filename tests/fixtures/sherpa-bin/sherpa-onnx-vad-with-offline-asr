@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' '0.100 -- 1.250: first segment'
+printf '%s\n' '2.000 -- 3.500: second segment'

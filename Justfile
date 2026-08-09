@@ -3,6 +3,17 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
+# Build the portable CPU sherpa-onnx runtime image.
+build-sherpa:
+    docker build --file docker/sherpa-onnx/Dockerfile --tag asr-sherpa-onnx .
+
+# Build every currently implemented runtime image.
+build: build-sherpa
+
+# Run host-side syntax, manifest, policy, and wrapper smoke tests.
+check:
+    @./scripts/check
+
 # Show the pinned model catalog without downloading anything.
 list-models:
     @./scripts/models list
