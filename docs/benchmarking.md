@@ -78,3 +78,9 @@ than subtracting media time from throughput time.
 The latest engineering and deterministic subset validation, plus the boundary
 between completed subset coverage and pending full/streaming stages, are in
 [`reproducibility-report.md`](reproducibility-report.md).
+
+The exact records behind the README's validated 100-utterance tables are
+versioned in
+[`benchmarks/published/2026-08-09-librispeech-100`](../benchmarks/published/2026-08-09-librispeech-100/README.md).
+Generated ledgers remain external by default; only reviewed snapshots derived
+from public evaluation corpora belong in that directory.

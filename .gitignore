@@ -55,3 +55,9 @@ __pycache__/
 *.swp
 .idea/
 .vscode/
+
+# Curated, public benchmark snapshots are intentionally versioned. Local runs
+# elsewhere under benchmarks/ remain ignored because they may contain private
+# speech or transcripts.
+!/benchmarks/published/
+!/benchmarks/published/**

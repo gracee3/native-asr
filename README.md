@@ -51,6 +51,9 @@ rows. Runtime-specific, fingerprinted batching policies are part of every run,
 so this small gate is best read as failure/regression coverage. Exact run IDs,
 image IDs, policies, and limitations are in the
 [`reproducibility report`](docs/reproducibility-report.md).
+The exact 18 summary records and their 1,800 per-utterance detail records are
+published in the
+[`2026-08-09 benchmark snapshot`](benchmarks/published/2026-08-09-librispeech-100/README.md).
 
 ## Architecture
 
@@ -267,8 +270,10 @@ packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).
 - [`docs/benchmarking.md`](docs/benchmarking.md) — benchmark and accuracy metadata contract
 - [`docs/reproducibility-report.md`](docs/reproducibility-report.md) — validated images, run IDs, and current limitations
 
-Private recordings, transcripts, downloaded weights, and benchmark outputs are
-ignored by both Git and the Docker build context.
+Private recordings, transcripts, downloaded weights, and local benchmark
+outputs are ignored by Git and the Docker build context. Curated benchmark
+snapshots derived only from public evaluation corpora may be published under
+`benchmarks/published`; benchmark data remains excluded from runtime images.
 
 ## License
 
