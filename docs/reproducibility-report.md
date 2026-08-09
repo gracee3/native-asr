@@ -21,10 +21,61 @@ model-free, and network-disabled inference gates:
 
 | Image | Image ID | Bytes | Configured user |
 |---|---|---:|---|
-| `asr-sherpa-onnx` | `sha256:8d9cb1be58249f65dcb8b6bf0c78c56d72502d8b58e6d1129e4c61053a0cde8f` | 208,228,799 | `65532:65532` |
-| `asr-nemo-speech` | `sha256:fe6080c29698d70cfd2b79ffc34abb56913683f3b310cf9d09edda12cb94eb5f` | 200,587,544 | `65532:65532` |
-| `asr-moonshine` | `sha256:846ceb02b61f6fed0feb7e38f7c7574a973f9a2f27b8b50839d778d4d70b2302` | 214,393,412 | `65532:65532` |
-| `asr-whisper-cpp` | `sha256:5c8e4e65f52fec4f49e758ec7998de2031006cea2567d49f6e07f5d5e9e11d54` | 199,119,113 | `65532:65532` |
+| `asr-sherpa-onnx` | `sha256:1deb3ee342cd7aadb02f0b408dfaabd33e7775409378df698066a4ab15f7072a` | 208,228,994 | `65532:65532` |
+| `asr-nemo-speech` | `sha256:c77deabc18bbe649288161e2bb4e6660fbdf8c00a291d799bf9ac3439e65917c` | 200,586,441 | `65532:65532` |
+| `asr-moonshine` | `sha256:8c057ded9d4b3ba99fa5027ba655546a6213b37eb1f89a5c744a3dc31dc6cf38` | 214,392,015 | `65532:65532` |
+| `asr-whisper-cpp` | `sha256:fc0255d232ffe39294057f8a5e1cdd15625d651198891204fd4da1f0a56f2ab2` | 199,118,725 | `65532:65532` |
+
+The benchmark host was an 11th Gen Intel Core i7-1185G7 with four physical
+cores, eight logical CPUs, 33,365,962,752 bytes of RAM, Linux
+`7.0.0-28-generic`, and Docker `29.7.2`. It remained on AC power in the
+performance profile. A pre-validation unbounded Sherpa batch caused thermal
+throttling and was rejected; none of its measurements appear below.
+
+## Deterministic 100-utterance subset validation
+
+All 18 final-fingerprint runs completed with zero failures on clean Git
+revision `797eb65c3216702457b551f9308125203cc2b331`. Each split independently
+uses the first 100 utterance IDs ranked by SHA-256. WER uses
+`english-upper-apostrophe-v1`; RTF is batch wall time divided by prepared audio
+duration and excludes the separately recorded cold-start probe.
+
+### LibriSpeech `test-clean`
+
+| Model | Run ID | WER | RTF | Peak RSS KiB |
+|---|---|---:|---:|---:|
+| `sherpa:parakeet-unified-en` | `20260809T174303153388Z-5a6a2972ab40` | 4.46% | 0.131 | 3,664,144 |
+| `sherpa:canary-180m-flash` | `20260809T174452951202Z-e41c28c2a9fd` | 7.25% | 0.101 | 733,564 |
+| `sherpa:nemotron-streaming-en` | `20260809T174617510134Z-2b95027ab002` | 6.38% | 0.112 | 7,180,160 |
+| `nemo:parakeet-tdt-v3` | `20260809T174753072178Z-cc8b31d49ecf` | 2.02% | 0.162 | 959,144 |
+| `nemo:nemotron-streaming-en` | `20260809T175007319530Z-d4310534049b` | 2.59% | 0.297 | 962,084 |
+| `nemo:nemotron-3.5-streaming` | `20260809T180139075576Z-02a51ed21e73` | 4.17% | 0.334 | 960,136 |
+| `nemo:parakeet-ctc-1.1b` | `20260809T180615628321Z-d2a8f7ecf818` | 2.45% | 0.280 | 1,570,188 |
+| `moonshine:small-streaming-en` | `20260809T181019844622Z-8ced8e8f09c7` | 6.33% | 0.297 | 702,112 |
+| `whisper:small.en` | `20260809T181423306432Z-da590fc7b8fb` | 2.88% | 0.615 | 777,632 |
+
+### LibriSpeech `test-other`
+
+| Model | Run ID | WER | RTF | Peak RSS KiB |
+|---|---|---:|---:|---:|
+| `sherpa:parakeet-unified-en` | `20260809T182250705320Z-fb8180c893b5` | 3.59% | 0.136 | 3,674,632 |
+| `sherpa:canary-180m-flash` | `20260809T182413725398Z-d1b2a462ad85` | 4.07% | 0.108 | 635,648 |
+| `sherpa:nemotron-streaming-en` | `20260809T182519568158Z-85595fa8012b` | 9.73% | 0.116 | 7,120,244 |
+| `nemo:parakeet-tdt-v3` | `20260809T182631716247Z-cb74fe9a87a7` | 4.26% | 0.162 | 904,440 |
+| `nemo:nemotron-streaming-en` | `20260809T182809398825Z-d83e7c4a0bf5` | 6.26% | 0.322 | 962,016 |
+| `nemo:nemotron-3.5-streaming` | `20260809T183122525387Z-3f6b60459ca6` | 9.67% | 0.320 | 960,432 |
+| `nemo:parakeet-ctc-1.1b` | `20260809T183434978852Z-a9b1157407c4` | 4.13% | 0.276 | 1,511,132 |
+| `moonshine:small-streaming-en` | `20260809T183730608520Z-cd1cd28aa34f` | 14.10% | 0.298 | 689,268 |
+| `whisper:small.en` | `20260809T184027681230Z-e833b1a5320b` | 7.29% | 0.824 | 777,456 |
+
+These subsets are a reproducible failure and gross-regression gate, not a
+full-split ranking. Most runtime batches load once and reuse the model for the
+remaining 99 utterances. Sherpa Parakeet instead used its fingerprinted bounded
+policy: 19 loads on `test-clean` and nine on `test-other`, with utterances over
+20 seconds routed through the pinned Silero VAD path. NeMo CTC's policy
+canonicalized three native non-standard `-nan` aggregate confidence values to
+JSON `null` on `test-clean`; transcript text was unaffected and all 100 strict
+records were validated.
 
 ## Nine-alias engineering validation
 
@@ -54,7 +105,11 @@ under final validation. The image, model, dataset, preprocessing, options, and
 exact host-adapter digest are all part of each resume fingerprint; the tested
 adapter content is the content committed with this report.
 
-## Streaming validation
+## Earlier engineering streaming validation
+
+The streaming results in this section predate the clean `797eb65` subset
+matrix and are retained as engineering validation, not final staged-suite
+results.
 
 All four stateful aliases completed the 13.69-second shared sample with ordered,
 contiguous event sequences and measured in-container CPU/RSS metrics:
@@ -79,17 +134,20 @@ partial revisions.
 
 ## Staged-suite status and limitations
 
-`just bench-suite staged` now implements the complete deterministic matrix:
+`just bench-suite staged` implements the complete deterministic matrix:
 both 100-utterance LibriSpeech subsets across nine aliases, full splits across
 four finalists, the five-minute paced stream, and unpaced full AMI streaming.
 It is resumable only on an exact runtime image, model, dataset, preprocessing,
 adapter, and options fingerprint, and it never reports an overlap-sensitive AMI
 full-meeting WER.
 
-The full staged matrix was not executed during this implementation pass; it is
-many CPU-hours beyond the engineering validation above. Consequently this
-report publishes no purported full-split rankings. The committed suite and the
-verified external artifacts are ready for a resumable dedicated run.
+The 18-row subset phase completed and its gate passed. The full-corpus phase
+then started, but was stopped at the user's request before its first summary
+record so these subset results and licensing could be reviewed for public
+release. Consequently this report publishes no purported full-split ranking.
+No successful full-corpus fingerprint exists yet; rerunning the staged suite
+will resume all 18 subset rows and begin the four-finalist full phase from its
+first row. Final-revision paced streaming and AMI runs also remain pending.
 
 The official Moonshine v0.1.1 Small Streaming component catalog currently
 installs 247,255,694 bytes across eight locked files, rather than the earlier

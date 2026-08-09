@@ -19,6 +19,39 @@ Four pinned native CPU runtimes, nine ASR aliases, locked public evaluation
 corpora, stateful streaming adapters, and reproducible WER/performance suites
 share one model-free, network-disabled container interface.
 
+The deterministic 100-utterance gate is complete for all nine aliases on both
+LibriSpeech splits: 18/18 runs completed with zero failures. The full-corpus
+stage is intentionally not published yet; it remains resumable from the
+external benchmark ledger after this snapshot is reviewed.
+
+## Validated benchmark snapshot
+
+These are the SHA-256-ranked 100-utterance gate results from 2026-08-09, not a
+claimed full-split ranking. Every cell used the same clean Git revision
+`797eb65`, locked artifacts, `english-upper-apostrophe-v1` WER normalization,
+and CPU-only containers on an Intel Core i7-1185G7 (4 cores / 8 threads,
+31.1 GiB RAM).
+
+| Model | `test-clean` WER | `test-other` WER | `test-clean` RTF | `test-other` RTF | Max RSS GiB |
+|---|---:|---:|---:|---:|---:|
+| `sherpa:parakeet-unified-en` | 4.46% | 3.59% | 0.131 | 0.136 | 3.50 |
+| `sherpa:canary-180m-flash` | 7.25% | 4.07% | 0.101 | 0.108 | 0.70 |
+| `sherpa:nemotron-streaming-en` | 6.38% | 9.73% | 0.112 | 0.116 | 6.85 |
+| `nemo:parakeet-tdt-v3` | 2.02% | 4.26% | 0.162 | 0.162 | 0.91 |
+| `nemo:nemotron-streaming-en` | 2.59% | 6.26% | 0.297 | 0.322 | 0.92 |
+| `nemo:nemotron-3.5-streaming` | 4.17% | 9.67% | 0.334 | 0.320 | 0.92 |
+| `nemo:parakeet-ctc-1.1b` | 2.45% | 4.13% | 0.280 | 0.276 | 1.50 |
+| `moonshine:small-streaming-en` | 6.33% | 14.10% | 0.297 | 0.298 | 0.67 |
+| `whisper:small.en` | 2.88% | 7.29% | 0.615 | 0.824 | 0.74 |
+
+Lower is better for both WER and RTF; RTF below `1.0` is faster than real time.
+RTF is batch wall time divided by audio duration and excludes the separately
+recorded cold-start probe. Max RSS is the larger in-container peak from the two
+rows. Runtime-specific, fingerprinted batching policies are part of every run,
+so this small gate is best read as failure/regression coverage. Exact run IDs,
+image IDs, policies, and limitations are in the
+[`reproducibility report`](docs/reproducibility-report.md).
+
 ## Architecture
 
 ```text
@@ -184,7 +217,8 @@ The timed region includes container startup, normalization, model loading, and
 inference. It excludes prior model checksum verification and image inspection.
 Single-file records and set/suite summaries default to the external benchmark
 store. Dataset runs retain raw and normalized text, use versioned English WER,
-load each model once per batch, and resume only when every fingerprint matches:
+apply a fingerprinted runtime-specific batching policy, and resume only when
+every fingerprint matches:
 
 ```bash
 just datasets
@@ -197,6 +231,11 @@ The staged suite evaluates deterministic 100-utterance subsets, the four fixed
 finalists on full LibriSpeech splits, a reproducible five-minute paced stream,
 and the full AMI meeting. AMI is not assigned a misleading overlap-sensitive
 full-meeting WER.
+
+Dataset evaluation uses a fingerprinted batching policy for each runtime.
+Most runtimes reuse one model load across the set; Sherpa Parakeet uses bounded
+groups and routes utterances over 20 seconds through the same pinned Silero VAD
+path used for production long-form transcription.
 
 Show the runtime source pins at any time:
 
@@ -230,3 +269,11 @@ packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).
 
 Private recordings, transcripts, downloaded weights, and benchmark outputs are
 ignored by both Git and the Docker build context.
+
+## License
+
+The original code, tests, and documentation in this repository are licensed
+under the [MIT License](LICENSE). This grant does not relicense upstream native
+runtimes, external model weights, or evaluation datasets. Their licenses and
+exact source revisions are recorded in the lockfiles and retained in built
+images where applicable.

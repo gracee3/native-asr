@@ -55,12 +55,16 @@ status. The default destination is `/data/benchmarks/native-asr/runs.jsonl`.
 timed inputs are precomputed 16 kHz mono PCM16 files. JSONL manifests preserve
 utterance ID, split, paths, raw reference, duration, speaker, and source digest.
 
-`scripts/benchmark-set` ranks subset candidates by SHA-256 of utterance ID,
-starts one runtime container, loads the model once, and scores independent
-reference/hypothesis pairs. Detail output is atomic and prior runs remain.
-Resume requires identical image, model, dataset, preprocessing, and options.
-A separate single-utterance cold calibration probe records startup, model load,
-and first-inference wall time; it is not included in the long-lived batch RTF.
+`scripts/benchmark-set` ranks subset candidates by SHA-256 of utterance ID and
+scores independent reference/hypothesis pairs with a fingerprinted
+runtime-specific batching policy. Most runtimes use one container and one model
+load for the set. Sherpa Parakeet uses bounded groups and the pinned Silero VAD
+path for utterances over 20 seconds to avoid the upstream offline CLI's large
+concurrent-stream and long-utterance failure modes. Detail output is atomic and
+prior runs remain. Resume requires identical image, model, dataset,
+preprocessing, adapter, and options. A separate single-utterance cold
+calibration probe records startup, model load, and first-inference wall time;
+it is not included in the batch RTF.
 
 Streaming JSONL uses `stt_partial`, `stt_final`, `stt_error`, and `stt_metrics`
 with ordered sequence, audio position, monotonic time, text, finality, and
@@ -71,6 +75,6 @@ peak RSS, RTF, failures, and event-order validation. Paced runs report partial
 and finalization lag; unpaced AMI runs leave those latency fields null rather
 than subtracting media time from throughput time.
 
-The latest local engineering validation and the boundary between completed
-smoke coverage and the not-yet-executed full staged matrix are recorded in
+The latest engineering and deterministic subset validation, plus the boundary
+between completed subset coverage and pending full/streaming stages, are in
 [`reproducibility-report.md`](reproducibility-report.md).

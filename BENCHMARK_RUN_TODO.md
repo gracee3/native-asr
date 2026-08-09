@@ -7,6 +7,13 @@ implementation pass. Do not add models or change decoder code before these
 runs: a changed image, adapter, model, dataset, preprocessing recipe, or option
 set creates a different benchmark fingerprint.
 
+Status on 2026-08-09: sections 1-4 are complete on clean benchmark revision
+`797eb65c3216702457b551f9308125203cc2b331`. All 18 deterministic subset rows
+passed with zero failures and are published in
+`docs/reproducibility-report.md`. The full phase was stopped before its first
+summary record to review the public README and license. Resume at section 5;
+the exact staged command will reuse the successful subset fingerprints.
+
 ## Ground rules
 
 - Work from a clean checkout of `main` and record `git rev-parse HEAD`.
