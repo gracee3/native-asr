@@ -218,11 +218,13 @@ class EventValidator:
         lag = optional_clock("delivery_lag_seconds")
         if raw is None or delivery is None:
             raise ValueError("endpoint delivery clocks must be present")
-        if abs(delivery - end) > 0.002 or abs(delivery - event["audio_position_seconds"]) > 0.002:
+        if abs(delivery - event["audio_position_seconds"]) > 0.002:
             raise ValueError("endpoint event delivery position changed")
         if automatic:
             if decode is None or crossing is None or lag is None:
                 raise ValueError("automatic endpoint clocks are incomplete")
+            if abs(crossing - end) > 0.002:
+                raise ValueError("automatic endpoint source boundary changed")
             if crossing > decode + 0.002 or decode > raw + 0.002:
                 raise ValueError("automatic endpoint clocks are out of order")
             if abs(lag - (delivery - crossing)) > 0.002:
@@ -230,8 +232,11 @@ class EventValidator:
             if last_token is not None and abs(
                     crossing - last_token - ENDPOINT_SILENCE_MILLISECONDS / 1_000) > 0.002:
                 raise ValueError("endpoint threshold crossing is inconsistent")
-        elif any(value is not None for value in (decode, last_token, crossing, lag)):
-            raise ValueError("EOF endpoint diagnostics unexpectedly carry decoder clocks")
+        else:
+            if any(value is not None for value in (decode, last_token, crossing, lag)):
+                raise ValueError("EOF endpoint diagnostics unexpectedly carry decoder clocks")
+            if abs(delivery - end) > 0.002:
+                raise ValueError("EOF source boundary changed")
         return diagnostic
 
     def _common(self, event: dict[str, Any]) -> None:
@@ -386,6 +391,10 @@ class EventValidator:
         elif kind == "session_metrics":
             if self.metrics is not None or self.current is not None:
                 raise ValueError("session metrics arrived before finalized segment state")
+            if (not self.segments or abs(
+                    float(self.segments[-1]["source_time"]["end_seconds"]) -
+                    float(event["audio_position_seconds"])) > 0.002):
+                raise ValueError("final source partition does not end at EOF")
             loads = event.get("model_load_counts")
             if loads != {NEMOTRON_ALIAS: 1, PARAKEET_ALIAS: 1}:
                 raise ValueError("cascade did not report exactly one load per model")
@@ -541,6 +550,7 @@ class CascadeJob:
         self.adapter_sha256 = _adapter_sha256([
             self.root / "scripts/cascade", self.root / "scripts/lib/cascade.py",
             self.root / "docker/nemo-speech/entrypoint.sh",
+            self.root / "docker/nemo-speech/cascade-boundary.h",
             self.root / "docker/nemo-speech/native-asr-cascade.cpp",
             self.root / "docker/nemo-speech/endpoint-diagnostics.patch",
             self.root / "docker/nemo-speech/Dockerfile",

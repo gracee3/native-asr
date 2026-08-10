@@ -37,6 +37,7 @@ RUN git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/NeMo-Sp
 
 WORKDIR /src/nemo-speech
 COPY docker/nemo-speech/native-asr-cascade.cpp /tmp/native-asr-cascade.cpp
+COPY docker/nemo-speech/cascade-boundary.h /tmp/cascade-boundary.h
 RUN cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_AVX=ON \
@@ -66,7 +67,7 @@ RUN cmake -S . -B build -G Ninja \
         -DNEMO_SPEECH_WITH_NMT=OFF \
         -DNEMO_SPEECH_WITH_NORM=OFF \
     && cmake --build build --parallel --target nemo_speech_cli nemo_speech_asr_c \
-    && c++ -std=c++17 -O3 -I include /tmp/native-asr-cascade.cpp \
+    && c++ -std=c++17 -O3 -I include -I /tmp /tmp/native-asr-cascade.cpp \
         -L build/bin -Wl,-rpath-link,build/bin -lnemo_speech_asr_c \
         -o build/bin/native-asr-cascade \
     && install -d /opt/native-asr/bin /opt/native-asr/lib \

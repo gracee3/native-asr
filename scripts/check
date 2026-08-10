@@ -45,6 +45,7 @@ python3 -m py_compile scripts/lib/*.py
 ./tests/nemo-entrypoint-smoke
 ./tests/nemo-endpoint-patch-unit
 ./tests/transcribe-smoke
+./tests/cascade-boundary-unit
 ./tests/cascade-unit
 ./tests/cascade-smoke
 ./tests/cascade-bounded-unit

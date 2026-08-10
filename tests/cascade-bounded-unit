@@ -72,6 +72,21 @@ diagnostic = pilot_endpoint_diagnostic(
 assert diagnostic["gap_endpointed"] and diagnostic["eof_endpointed"]
 assert diagnostic["extra_endpoints_seconds"] == [2.0]
 
+# Endpoint attribution follows repaired source ownership while classification
+# continues to describe the unchanged, later event delivery clock.
+late_detail = {
+    "endpoints_seconds": [4.2, 8.0],
+    "endpoint_diagnostics": [{
+        "automatic_endpoint": True,
+        "logical_threshold_crossing_seconds": 4.2,
+        "event_delivery_position_seconds": 4.8,
+        "delivery_lag_seconds": 0.6,
+    }],
+}
+assert pilot_endpoint_diagnostic(pilot_pair, late_detail)["gap_endpointed"]
+assert classify_gap_endpoint(pilot_pair, late_detail)["classification"] == \
+    "logical_in_gap_delivery_late"
+
 def clock_detail(logical=None, delivery=None):
     rows = [] if logical is None else [{
         "automatic_endpoint": True,

@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "cascade-boundary.h"
 #include "nemo_speech/asr.h"
 
 namespace {
@@ -277,8 +278,9 @@ struct Cascade {
 
     void emit_update(
         const std::string& state, const std::string& track, int revision,
-        const std::string& text, double start, double end, const std::string& model_alias,
-        const std::string& extra = {}, const std::string& words = {}) {
+        const std::string& text, double start, double end, double delivery_position,
+        const std::string& model_alias, const std::string& extra = {},
+        const std::string& words = {}) {
         std::string fields =
             "\"segment_id\":" + json_string(segment_id()) +
             ",\"track_id\":" + json_string(track) +
@@ -290,7 +292,7 @@ struct Cascade {
             ",\"model_alias\":" + (model_alias.empty() ? "null" : json_string(model_alias));
         if (!words.empty()) fields += ",\"words\":" + words;
         if (!extra.empty()) fields += "," + extra;
-        emitter.emit("transcript_update", end, fields);
+        emitter.emit("transcript_update", delivery_position, fields);
     }
 
     void provisional(const std::string& text, double audio_position) {
@@ -301,7 +303,8 @@ struct Cascade {
         ++partials;
         emit_update(
             "provisional", "nemotron", nemotron_revision, cleaned,
-            static_cast<double>(segment_start) / kSampleRate, audio_position, kNemotronAlias);
+            static_cast<double>(segment_start) / kSampleRate, audio_position, audio_position,
+            kNemotronAlias);
     }
 
     void warning(const std::string& code, const std::string& message, double position) {
@@ -313,19 +316,36 @@ struct Cascade {
                 ",\"model_alias\":" + json_string(kParakeetAlias));
     }
 
-    void finalize(nemo_speech_asr_result* nemotron_result, size_t boundary) {
-        boundary = std::min(boundary, audio.size());
-        if (boundary <= segment_start) return;
+    bool finalize(
+        nemo_speech_asr_result* nemotron_result, size_t delivered_samples, std::string& error) {
+        const bool automatic = nemo_speech_asr_result_endpoint_triggered(nemotron_result);
+        const double logical_crossing = static_cast<double>(
+            nemo_speech_asr_result_endpoint_threshold_crossing(nemotron_result));
+        const auto resolved = native_asr::resolve_cascade_boundary(
+            automatic, logical_crossing, segment_start, delivered_samples, audio.size(),
+            kSampleRate);
+        if (resolved.error != native_asr::BoundaryError::none) {
+            error = native_asr::boundary_error_message(resolved.error);
+            return false;
+        }
+        const size_t boundary = resolved.sample;
+        if (boundary == segment_start && !automatic && boundary == audio.size()) return true;
+        if (boundary <= segment_start) {
+            error = "EOF boundary does not complete the remaining source audio";
+            return false;
+        }
         const double start = static_cast<double>(segment_start) / kSampleRate;
         const double end = static_cast<double>(boundary) / kSampleRate;
+        const double delivery_position = static_cast<double>(delivered_samples) / kSampleRate;
         const char* raw_nemotron = nemo_speech_asr_result_transcript(nemotron_result, 0);
         const std::string nemotron = trim(raw_nemotron ? raw_nemotron : "");
         const std::string endpoint_diagnostics =
-            endpoint_diagnostics_json(nemotron_result, end);
+            endpoint_diagnostics_json(nemotron_result, delivery_position);
         ++nemotron_revision;
         emit_update(
             "segment_final", "nemotron", nemotron_revision, nemotron, start, end,
-            kNemotronAlias, endpoint_diagnostics, words_json(nemotron_result, 0.0));
+            delivery_position, kNemotronAlias, endpoint_diagnostics,
+            words_json(nemotron_result, 0.0));
 
         nemo_speech_asr_recognition_options options = nemo_speech_asr_recognition_options_default();
         options.language_code = "en";
@@ -353,7 +373,7 @@ struct Cascade {
                 warning(
                     "pass_two_empty",
                     "Parakeet returned an empty segment; selecting Nemotron when nonempty",
-                    end);
+                    delivery_position);
             }
         } else {
             const char* detail = nemo_speech_asr_last_error();
@@ -361,7 +381,7 @@ struct Cascade {
                 "pass_two_error",
                 std::string("Parakeet segment inference failed; selecting Nemotron when nonempty: ") +
                     (detail ? detail : "unknown error"),
-                end);
+                delivery_position);
         }
         if (selection.empty() && !nemotron.empty()) {
             selected = nemotron;
@@ -381,14 +401,15 @@ struct Cascade {
             ",\"supersedes\":{\"track_id\":\"nemotron\",\"revision\":" +
             std::to_string(nemotron_revision) + "}," + endpoint_diagnostics;
         emit_update(
-            "cascade_final", "authoritative", 1, selected, start, end, model_alias,
-            extra, selected_words);
+            "cascade_final", "authoritative", 1, selected, start, end, delivery_position,
+            model_alias, extra, selected_words);
         if (!selected.empty()) authoritative.push_back(selected);
 
         segment_start = boundary;
         ++segment_number;
         nemotron_revision = 0;
         last_partial.clear();
+        return true;
     }
 
     std::string transcript() const {
@@ -517,7 +538,13 @@ int main(int argc, char** argv) {
             if (!result.value) break;
             const char* raw = nemo_speech_asr_result_transcript(result.value, 0);
             if (nemo_speech_asr_result_is_final(result.value)) {
-                cascade.finalize(result.value, pushed);
+                if (!cascade.finalize(result.value, pushed, error)) {
+                    emitter.emit(
+                        "session_error", static_cast<double>(pushed) / kSampleRate,
+                        "\"stage\":\"boundary_attribution\",\"message\":" +
+                            json_string(error));
+                    return 1;
+                }
             } else {
                 cascade.provisional(
                     raw ? raw : "", nemo_speech_asr_result_audio_processed(result.value));
@@ -546,7 +573,13 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!result.value) break;
-        if (nemo_speech_asr_result_is_final(result.value)) cascade.finalize(result.value, pushed);
+        if (nemo_speech_asr_result_is_final(result.value) &&
+            !cascade.finalize(result.value, pushed, error)) {
+            emitter.emit(
+                "session_error", static_cast<double>(pushed) / kSampleRate,
+                "\"stage\":\"boundary_attribution\",\"message\":" + json_string(error));
+            return 1;
+        }
     }
 
     const double inference_seconds =

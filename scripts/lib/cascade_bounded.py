@@ -367,6 +367,7 @@ def adapter_digest(root: Path) -> str:
     for relative in (
         "scripts/benchmark-cascade-bounded", "scripts/lib/cascade_bounded.py",
         "scripts/cascade", "scripts/lib/cascade.py", "scripts/lib/evaluation.py",
+        "docker/nemo-speech/cascade-boundary.h",
         "docker/nemo-speech/native-asr-cascade.cpp", "docker/nemo-speech/Dockerfile",
         "docker/nemo-speech/endpoint-diagnostics.patch",
     ):
@@ -379,6 +380,7 @@ def cascade_adapter_digest(root: Path) -> str:
     return _adapter_sha256([
         root / "scripts/cascade", root / "scripts/lib/cascade.py",
         root / "docker/nemo-speech/entrypoint.sh",
+        root / "docker/nemo-speech/cascade-boundary.h",
         root / "docker/nemo-speech/native-asr-cascade.cpp",
         root / "docker/nemo-speech/endpoint-diagnostics.patch",
         root / "docker/nemo-speech/Dockerfile",

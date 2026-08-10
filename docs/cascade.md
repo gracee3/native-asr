@@ -40,7 +40,12 @@ with no endpointing pause has unbounded second-pass latency until EOF. This is
 an explicit version-one limitation.
 
 At each endpoint, Parakeet runs synchronously on the exact source slice assigned
-to that endpoint while its recognizer remains loaded. A valid nonempty
+to that endpoint while its recognizer remains loaded. Automatic endpoint source
+ownership ends at the runtime's logical threshold-crossing clock, rounded to the
+nearest 16 kHz sample; event delivery remains at the later audio frontier. EOF
+owns the delivered frontier. Consecutive half-open slices share exactly one
+boundary, so the adapter-owned PCM is neither lost, repeated, nor overlapped.
+A valid nonempty
 Parakeet hypothesis is authoritative. An error or empty hypothesis emits a
 warning and selects the Nemotron final explicitly; if Nemotron is also empty,
 the authoritative event records a `silence` segment. Parakeet word times are
@@ -66,7 +71,7 @@ messages, and errors use stderr. Every event has:
 | `sequence` | contiguous integer starting at `1` |
 | `event` | one of the event types below |
 | `emitted_monotonic_seconds` | nondecreasing seconds since adapter start |
-| `audio_position_seconds` | nondecreasing position in source audio |
+| `audio_position_seconds` | nondecreasing delivered position in source audio |
 
 The event order is `session_started`, zero or more transcript/warning events,
 `session_metrics`, and `session_completed`. A failed or cancelled stream ends
@@ -96,14 +101,18 @@ Both final updates also carry the same schema-1 `endpoint_diagnostics` object.
 It records whether an automatic endpoint fired, the decoder clock, nullable
 last-token clock, logical threshold-crossing clock, raw audio frontier, event
 delivery position, and delivery lag. EOF finals set the endpoint clocks and
-lag to `null`. These diagnostics do not change `source_time` or endpoint
-behavior.
+lag to `null`. For an automatic final, `source_time.end_seconds` agrees with the
+rounded logical threshold crossing while `audio_position_seconds`, event
+delivery position, and delivery lag preserve when the result actually arrived.
+An absent, non-finite, repeated, or future logical boundary is fatal
+`boundary_attribution` corruption rather than being clamped. The final
+contiguous source partition must end at EOF.
 
 `session_metrics` is required for success. It reports one load for each fixed
 model, native phase timings, segment/update/warning counts, and all selection
 counts. The host rejects non-contiguous revisions, invalid transitions,
 timestamp ranges, malformed JSON, provenance disagreements, missing metrics,
-and output after a terminal event.
+an incomplete PCM partition, and output after a terminal event.
 
 ## Audit bundle
 

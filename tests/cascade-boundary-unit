@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-cascade-boundary.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+c++ -std=c++17 -Wall -Wextra -Werror \
+  -I "$repo_root/docker/nemo-speech" \
+  "$repo_root/tests/cascade-boundary-unit.cpp" \
+  -o "$work/cascade-boundary-unit"
+"$work/cascade-boundary-unit"
+printf '%s\n' 'cascade boundary unit tests: ok'

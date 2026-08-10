@@ -42,6 +42,11 @@ jq -e '
 [[ $(< "$bundle/transcript.txt") == 'first accurate second accurate' ]]
 jq -e '.segments | length == 2
   and .[0].authoritative.selection == "parakeet"
+  and .[0].source_time == {"start_seconds":0,"end_seconds":1.4}
+  and .[0].authoritative.audio_position_seconds == 1.5
+  and .[0].endpoint_diagnostics.logical_threshold_crossing_seconds == 1.4
+  and .[0].endpoint_diagnostics.event_delivery_position_seconds == 1.5
+  and .[1].source_time == {"start_seconds":1.4,"end_seconds":3.5}
   and .[1].authoritative.words[0].start_seconds == 1.7' "$bundle/segments.json" >/dev/null
 jq -s -e 'length == 9 and .[0].event == "session_started"
   and .[0].endpointing == {"kind":"token_silence","silence_milliseconds":1200}
