@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+PYTHONPATH="$repo_root/scripts/lib" python3 - <<'PY'
+from ensemble import add_native_timing, build_consensus, lexical_tokens
+
+
+def track(alias, text, result=None):
+    tokens = lexical_tokens(text)
+    basis = add_native_timing(result or {"text": text}, tokens)
+    return {"model_alias": alias, "timing_basis": basis, "normalized_tokens": tokens}
+
+
+# Tokenization is exactly the existing English policy, including Unicode apostrophes.
+tokens = lexical_tokens(" It’s—fine...  isn't it? ")
+assert [token["normalized"] for token in tokens] == ["IT'S", "FINE", "ISN'T", "IT"]
+assert [token["surface"] for token in tokens] == ["It’s", "fine", "isn't", "it"]
+
+# Substitution consensus takes both spelling and punctuation from the first supporter.
+result = build_consensus([
+    track("primary", "Hello, color."),
+    track("second", "Hello, colour!"),
+    track("third", "Hello, colour?"),
+])
+assert result["text"] == "Hello, colour!"
+assert result["decision_counts"]["majority_token"] == 1
+
+# Insertions and deletions are real confusion-network columns; null is a vote.
+inserted = build_consensus([
+    track("primary", "A C"), track("second", "A B C"), track("third", "A B C")
+])
+assert inserted["text"] == "A B C"
+assert inserted["decision_counts"]["majority_token"] == 1
+deleted = build_consensus([
+    track("primary", "A B C"), track("second", "A C"), track("third", "A C")
+])
+assert deleted["text"] == "A C"
+assert deleted["decision_counts"]["majority_deletion"] == 1
+
+# A three-way disagreement falls back to the primary and remains unresolved.
+fallback = build_consensus([
+    track("primary", "A CAT C"), track("second", "A DOG C"), track("third", "A FOX C")
+])
+assert fallback["text"] == "A CAT C"
+column = next(column for column in fallback["columns"] if column["unresolved"])
+assert column["decision"] == "primary_fallback"
+assert column["selected"]["model_alias"] == "primary"
+
+# Native word times remain word times; segment spans remain explicitly coarse.
+nemo = track("nemo", "one two", {
+    "text": "one two",
+    "words": [
+        {"word": "one", "start": 0.1, "end": 0.4},
+        {"word": "two", "start": 0.5, "end": 0.9},
+    ],
+})
+assert nemo["timing_basis"] == "word"
+assert nemo["normalized_tokens"][0]["timing"] == {
+    "basis": "word", "start_seconds": 0.1, "end_seconds": 0.4, "native_index": 0,
+}
+sherpa = track("sherpa", "one two", {
+    "text": "one two", "segments": [{"text": "one two", "start": 1.0, "end": 2.0}],
+})
+assert sherpa["timing_basis"] == "segment"
+assert all(token["timing"]["basis"] == "segment" for token in sherpa["normalized_tokens"])
+whisper = track("whisper", "one two", {
+    "text": "one two", "raw": {"transcription": [{
+        "text": "one two", "timestamps": {"from": "00:00:03.000", "to": "00:00:04.250"},
+    }]},
+})
+assert whisper["normalized_tokens"][1]["timing"]["end_seconds"] == 4.25
+unavailable = track("none", "one", {"text": "one"})
+assert unavailable["timing_basis"] == "unavailable"
+assert unavailable["normalized_tokens"][0]["timing"] is None
+
+# Consecutive non-unanimous columns are emitted as one contextualized span.
+grouped = build_consensus([
+    track("primary", "A B C D E"),
+    track("second", "A X Y D E"),
+    track("third", "A X Z D E"),
+])
+assert len(grouped["disagreements"]) == 1
+span = grouped["disagreements"][0]
+assert span["end_column_exclusive"] - span["start_column"] == 2
+assert span["context"] == {"before": "A", "after": "D E"}
+assert span["unresolved"]
+
+print("ensemble unit tests: ok")
+PY

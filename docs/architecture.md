@@ -82,3 +82,10 @@ runtime's model subtree and the input file's parent directory are mounted, both
 read-only. Container wrappers create normalized audio under temporary storage
 and emit JSON; the host enriches that JSON with the original absolute audio path
 and immutable artifact provenance.
+
+`scripts/ensemble` composes that boundary without bypassing it. It verifies all
+three configured models before starting, then invokes one complete measured
+`scripts/transcribe --format json` process group per model, sequentially. The
+host-only standard-library consensus layer preserves the three native results,
+aligns normalized lexical tokens to the first track, and publishes the audit
+directory atomically. It does not place Python or model data in a runtime image.

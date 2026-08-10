@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+REPO_ROOT="$repo_root" PYTHONPATH="$repo_root/scripts/lib" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+from ensemble import build_consensus, lexical_tokens
+from evaluation import errors
+
+root = Path(os.environ["REPO_ROOT"])
+snapshot = root / "benchmarks/published/2026-08-09-librispeech-100"
+runs = [json.loads(line) for line in (snapshot / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+aliases = ["nemo:parakeet-tdt-v3", "sherpa:parakeet-unified-en", "whisper:small.en"]
+expected = {
+    "librispeech-test-clean": {"maximum_errors": 42, "reference_words": 2084},
+    "librispeech-test-other": {"maximum_errors": 59, "reference_words": 1645},
+}
+
+for dataset, gate in expected.items():
+    tables = []
+    constituent_errors = []
+    for alias in aliases:
+        run = next(row for row in runs if row["dataset"] == dataset and row["model_alias"] == alias)
+        detail = snapshot / "details" / f"{run['run_id']}.jsonl"
+        rows = [json.loads(line) for line in detail.read_text(encoding="utf-8").splitlines()]
+        tables.append({row["utterance_id"]: row for row in rows})
+        constituent_errors.append(run["errors"])
+    assert list(tables[0]) == list(tables[1]) == list(tables[2])
+    consensus_errors = 0
+    reference_words = 0
+    first_pass = []
+    for utterance_id in tables[0]:
+        rows = [table[utterance_id] for table in tables]
+        tracks = [{"model_alias": alias, "normalized_tokens": lexical_tokens(row["hypothesis_raw"])}
+                  for alias, row in zip(aliases, rows)]
+        result = build_consensus(tracks)
+        first_pass.append(result["text"])
+        counts = errors(rows[0]["reference_raw"], result["text"])
+        consensus_errors += counts["errors"]
+        reference_words += counts["reference_words"]
+    # Repeating the full snapshot must produce byte-for-byte identical hypotheses.
+    second_pass = []
+    for utterance_id in tables[0]:
+        rows = [table[utterance_id] for table in tables]
+        tracks = [{"model_alias": alias, "normalized_tokens": lexical_tokens(row["hypothesis_raw"])}
+                  for alias, row in zip(aliases, rows)]
+        second_pass.append(build_consensus(tracks)["text"])
+    assert first_pass == second_pass
+    assert reference_words == gate["reference_words"]
+    assert consensus_errors <= min(constituent_errors) == gate["maximum_errors"]
+    print(f"{dataset}: consensus {consensus_errors}/{reference_words}; "
+          f"best constituent {min(constituent_errors)}/{reference_words}")
+
+print("ensemble snapshot regression: ok")
+PY

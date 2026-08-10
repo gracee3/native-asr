@@ -60,6 +60,10 @@ verify-models alias="":
 transcribe alias audio:
     @./scripts/transcribe {{ quote(alias) }} {{ quote(audio) }}
 
+# Run the deterministic three-model long-form ensemble and publish an audit bundle.
+ensemble audio output:
+    @./scripts/ensemble --output {{ quote(output) }} {{ quote(audio) }}
+
 # Benchmark one model/audio pair and append a provenance-rich JSONL record.
 bench alias audio:
     @./scripts/benchmark {{ quote(alias) }} {{ quote(audio) }}
