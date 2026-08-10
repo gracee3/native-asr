@@ -27,7 +27,8 @@ with tempfile.TemporaryDirectory() as temporary:
     selected_rows = {}
     for split in SPLITS:
         rows = [{
-            "utterance_id": f"{split}-u{index}", "split": split,
+            "utterance_id": f"{split}-u{index}",
+            "split": split.removeprefix("librispeech-"),
             "source_sha256": hashlib.sha256(f"source-{split}-{index}".encode()).hexdigest(),
             "reference": f"reference {index}",
         } for index in range(3)]
@@ -45,7 +46,7 @@ with tempfile.TemporaryDirectory() as temporary:
             source = selected_rows[split][0]
             detail = [{
                 "schema_version": 2, "run_id": run_id, "sequence": 0,
-                "utterance_id": source["utterance_id"], "split": split,
+                "utterance_id": source["utterance_id"], "split": source["split"],
                 "source_sha256": source["source_sha256"],
                 "reference_raw": source["reference"], "hypothesis_raw": "reference",
                 "exit_status": 0, "stderr": None,

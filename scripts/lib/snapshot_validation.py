@@ -104,7 +104,8 @@ def validate_runs(
                 != [item["utterance_id"] for item in expected]):
             raise ValueError(f"run detail ordering or completeness is invalid: {run_id}")
         for item, manifest_item in zip(rows, expected):
-            if (item.get("run_id") != run_id or item.get("split") != split
+            if (item.get("run_id") != run_id
+                    or item.get("split") != manifest_item.get("split")
                     or item.get("exit_status") != 0 or item.get("stderr") is not None
                     or item.get("source_sha256") != manifest_item["source_sha256"]
                     or item.get("reference_raw") != manifest_item["reference"]):
