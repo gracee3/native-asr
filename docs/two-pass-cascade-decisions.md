@@ -169,4 +169,3 @@ mode, not an extra stage stacked after the current models.
 - WeNet, [runtime overview](https://wenet-e2e.github.io/wenet/runtime.html)
 - WeNet, [LibriSpeech tutorial and decoding modes](https://wenet-e2e.github.io/wenet/tutorial_librispeech.html)
 - WeNet, [U2++: Unified Two-pass Bidirectional End-to-end Model for Speech Recognition](https://arxiv.org/abs/2106.05642)
-
