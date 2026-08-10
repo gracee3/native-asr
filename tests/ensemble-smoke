@@ -42,7 +42,7 @@ jq -e '
   and (.models | all(.container.image_id | startswith("sha256:test-")))
   and (.provenance.git_revision | length == 40)
   and (.provenance.adapter_sha256 | length == 64)
-  and .decision_counts.majority_token == 1
+  and .decision_counts.primary_fallback == 1
 ' "$bundle/result.json" >/dev/null
 [[ $(< "$bundle/transcript.txt") == 'Hello, brave world.' ]]
 [[ $(< "$bundle/consensus.txt") == 'Hello, brave world.' ]]
@@ -76,7 +76,7 @@ ordered=$work/ordered-bundle
 ordered_stdout=$("$repo_root/scripts/ensemble" --output "$ordered" \
   --model whisper:small.en --model nemo:parakeet-tdt-v3 \
   --model sherpa:parakeet-unified-en "$work/input.wav" 2> "$work/ordered.stderr")
-[[ $ordered_stdout == 'Hello, brave world!' ]]
+[[ $ordered_stdout == 'Hello, bold world!' ]]
 jq -e '.models[0].alias == "whisper:small.en" and .models[0].anchor
   and .models[1].alias == "nemo:parakeet-tdt-v3"' "$ordered/result.json" >/dev/null
 
@@ -100,9 +100,13 @@ jq -e '
 ' "$adjudicated/result.json" >/dev/null
 jq -e '
   .status == "complete"
+  and .policy_id == "primary-fallback-only-v1"
   and .model.alias == "llm:ministral-3b-instruct-2512"
   and .runtime.revision == "08659901c43b51de735740f1cf61bb82fbe0c4e4"
   and .runtime.policy.network == "none"
+  and .runtime.policy.adjudication_policy_id == "primary-fallback-only-v1"
+  and .counts.eligible_tie_columns == 1
+  and .counts.protected_majority_columns == 0
   and (.spans[0].prompt.input.columns[0].candidates | length == 3)
   and .spans[0].validated_choices[0].candidate.value == null
   and .execution.peak_rss_kb == 6000
@@ -189,16 +193,35 @@ unset NATIVE_ASR_TEST_INSPECT_FAIL_IMAGE
 jq -e '.status == "complete" and .text == .consensus_text
   and .adjudication.status == "unavailable"' "$unavailable/result.json" >/dev/null
 
-# Provenance is verified, but a no-disagreement job never starts the worker.
+# A boundary conflict rejects the whole tie span with an explicit reason.
+boundary=$work/boundary-bundle
+export NATIVE_ASR_TEST_BOUNDARY_CONFLICT=1
+"$repo_root/scripts/ensemble" --output "$boundary" \
+  --adjudicator llm:ministral-3b-instruct-2512 "$work/input.wav" \
+  > "$work/boundary.stdout" 2> "$work/boundary.stderr"
+unset NATIVE_ASR_TEST_BOUNDARY_CONFLICT
+jq -e '.text == .consensus_text and .adjudication.status == "fallback"
+  and .adjudication.counts.spans_fallback == 1
+  and .adjudication.fallback_code == "boundary_path_conflict"
+  and .adjudication.artifact == "adjudication.json"' "$boundary/result.json" >/dev/null
+jq -e '.spans[0].fallback_code == "boundary_path_conflict"
+  and .spans[0].fallback_reason == "boundary_path_conflict"' \
+  "$boundary/adjudication.json" >/dev/null
+
+# Provenance is verified, but ordinary 2-of-3 disagreement with no true tie
+# returns not_needed and never starts the worker.
 not_needed=$work/not-needed-bundle
-export NATIVE_ASR_TEST_UNANIMOUS=1 NATIVE_ASR_TEST_ADJUDICATOR_MODE=startup-failure
+export NATIVE_ASR_TEST_MAJORITY_ONLY=1 NATIVE_ASR_TEST_ADJUDICATOR_MODE=startup-failure
 "$repo_root/scripts/ensemble" --output "$not_needed" \
   --adjudicator llm:ministral-3b-instruct-2512 "$work/input.wav" \
   > "$work/not-needed.stdout" 2> "$work/not-needed.stderr"
-unset NATIVE_ASR_TEST_UNANIMOUS NATIVE_ASR_TEST_ADJUDICATOR_MODE
+unset NATIVE_ASR_TEST_MAJORITY_ONLY NATIVE_ASR_TEST_ADJUDICATOR_MODE
 jq -e '.status == "complete" and .adjudication.status == "not_needed"
+  and .adjudication.counts.eligible_tie_columns == 0
+  and .adjudication.counts.protected_majority_columns == 1
   and .adjudication.model.artifact.sha256 == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"' \
   "$not_needed/result.json" >/dev/null
+! grep -Fq 'starting adjudicator' "$work/not-needed.stderr"
 
 # A started runtime failure publishes evidence but no authoritative transcript.
 failed=$work/failed-bundle
@@ -287,22 +310,29 @@ jq -e '.status == "cancelled" and .failure.stage == "adjudication"
 # The repeated snapshot runner uses the same persistent protocol and records
 # deterministic validated choices even when a fake candidate misses the gate.
 benchmark_result=$work/adjudication-benchmark.json
+export NATIVE_ASR_TEST_ADJUDICATOR_MODE=abstain
 set +e
 "$repo_root/scripts/adjudication-benchmark" --output "$benchmark_result" \
+  --calibration-snapshot "$repo_root/benchmarks/published/2026-08-09-librispeech-100" \
+  --validation-snapshot "$repo_root/benchmarks/published/2026-08-09-librispeech-100" \
   --adjudicator llm:ministral-3b-instruct-2512 --repeats 2 --timeout 1 \
   > "$work/adjudication-benchmark.stdout" 2> "$work/adjudication-benchmark.stderr"
 benchmark_status=$?
 set -e
+unset NATIVE_ASR_TEST_ADJUDICATOR_MODE
 ((benchmark_status == 0 || benchmark_status == 1))
 jq -e '
-  .snapshot.utterances == 200
-  and .snapshot.spans == 141
-  and .snapshot.non_unanimous_columns == 244
+  .schema_version == 2
+  and .policy.id == "primary-fallback-only-v1"
+  and .evaluations.calibration.snapshot.utterances == 200
+  and .evaluations.calibration.snapshot.eligible_tie_spans == 22
+  and .evaluations.calibration.snapshot.eligible_tie_columns == 22
+  and .evaluations.calibration.snapshot.protected_majority_columns == 222
   and (.models | length == 1)
-  and .models[0].identical_validated_decisions
-  and .models[0].validated_spans == [141,141]
-  and .models[0].fallback_spans == [0,0]
-  and (.models[0].repeats | length == 2)
+  and .models[0].evaluations.calibration.identical_validated_decisions
+  and .models[0].evaluations.calibration.validated_spans == [22,22]
+  and .models[0].evaluations.calibration.fallback_spans == [0,0]
+  and (.models[0].evaluations.validation.repeats | length == 2)
 ' "$benchmark_result" >/dev/null
 
 # The bundle stays private after atomic rename.

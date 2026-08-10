@@ -48,6 +48,7 @@ python3 -m py_compile scripts/lib/*.py
 ./tests/ensemble-unit
 ./tests/ensemble-smoke
 ./tests/ensemble-regression
+./tests/snapshot-validation-unit
 ./tests/benchmark-smoke
 ./tests/benchmark-runner-smoke
 ./tests/paths-evaluation-smoke

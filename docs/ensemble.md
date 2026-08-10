@@ -4,8 +4,8 @@ The recorded-audio ensemble is English, CPU-only, and offline. It runs exactly
 three complete model transcriptions sequentially, aligns their lexical
 hypotheses, applies deterministic majority consensus, and atomically publishes
 an audit bundle. An optional local LLM may select only existing ASR tokens or
-deletions inside disagreement spans. It is disabled unless an adjudicator alias
-is explicitly supplied.
+deletions inside genuine 1-1-1 tie spans. It is disabled unless an adjudicator
+alias is explicitly supplied.
 
 ## Command
 
@@ -59,13 +59,16 @@ supporting the selected normalized token. Native timing is never interpolated:
 word timing stays word timing, segment timing stays explicitly coarse, and
 unmatched regions use `null`.
 
-## Bounded adjudication
+## Tie-only bounded adjudication
 
-Unanimous columns bypass the LLM. Each request covers one consecutive
-non-unanimous span and contains five deterministic tokens of context on each
+Policy `primary-fallback-only-v1` sends only consecutive `primary_fallback`
+columns, where all three normalized track values differ, to the LLM. Unanimous
+and 2-of-3 token or deletion majorities are protected and never appear in a
+request. The general disagreement artifact still reports all non-unanimous
+regions. Each tie request contains five deterministic tokens of context on each
 side, all three alternatives, the deterministic selection, and the exact three
-candidate values for every column. Transcript fields are serialized as inert
-JSON data rather than interpolated into instructions.
+candidate values for every eligible column. Transcript fields are serialized
+as inert JSON data rather than interpolated into instructions.
 
 The response must contain one decision per column. `candidate_index` is `0`,
 `1`, or `2` to select that track's exact token or deletion, and `-1` to abstain.
@@ -74,17 +77,19 @@ Reasons are restricted to `contextual_fit`, `grammar`, `orthography`,
 identities, uniqueness, completeness, bounds, and abstention consistency after
 schema-constrained generation.
 
-One invalid decision rejects the entire span. A normalized choice equal to
-consensus retains the deterministic surface form; another choice uses the exact
-ASR token or deletion. The LLM cannot invent lexical material, alter unanimous
-text, or change punctuation through an equivalent normalized candidate.
+One invalid decision rejects the entire span. The chosen track at each tie-span
+edge must also agree with the adjacent protected consensus column. A conflict
+atomically restores the deterministic span and records
+`boundary_path_conflict`. Prompt construction, response validation, and final
+rendering all enforce the tie-only rule, so an internal caller cannot override
+a majority.
 
 One pinned `llama-server` stays resident for an enabled job. It uses four CPU
 threads, a 4K context, one slot, greedy decoding, seed zero, and schema-
 constrained JSON. Its container has no network, capabilities, writable root,
 host audio mount, or model write access; only the selected model subtree is
-mounted read-only. No-disagreement jobs verify provenance without starting the
-worker.
+mounted read-only. Jobs with no true ties verify provenance without starting
+the worker, even when ordinary majority disagreements exist.
 
 ## Audit bundle
 
@@ -113,12 +118,13 @@ transcript.audit/
 
 Schema-2 `result.json` is the bundle index. `text` is authoritative final text;
 `consensus_text` preserves deterministic consensus. Its `adjudication` summary
-records status, immutable model/runtime provenance, execution metrics, counts,
-and the detailed artifact reference. Existing track, alignment, and
-disagreement files remain schema 1 and retain their deterministic meaning.
+records status, immutable model/runtime provenance, policy ID, eligible-tie and
+protected-majority counts, execution metrics, and the detailed artifact
+reference. Existing track, alignment, and disagreement files remain schema 1
+and retain their deterministic meaning.
 
 `adjudication.json` keeps every structured prompt, raw server response,
-validated choice, timing, and fallback reason. Its execution summary includes
+validated choice, timing, and explicit fallback code/reason. Its execution summary includes
 load and wall time, prompt/generated tokens and throughput, span p50/p95
 latency, CPU, exit status, and peak RSS. Status is one of `disabled`,
 `not_needed`, `complete`, `partial`, `fallback`, or `unavailable`.
@@ -138,12 +144,9 @@ Candidate-selection oracle ceilings are 27 and 40 errors respectively. Real
 model bake-off evidence and a recommended long-form alias are published only
 after both repeated-decision and accuracy gates pass.
 
-The 2026-08-10 bake-off produced identical decisions across repeats, but the 3B
-candidate scored 40/60 errors and the 8B candidate scored 45/57. Neither met
-the 37/54 split ceilings or strictly improved the combined 91-error baseline,
-so recommendation and production-path publication remain blocked. The complete
-evidence is in
-[`benchmarks/published/2026-08-10-adjudication-bakeoff`](../benchmarks/published/2026-08-10-adjudication-bakeoff/README.md).
+The earlier bounded-span result remains historical evidence. The tie-only
+experiment evaluates fresh prompts twice on both the original calibration
+snapshot and a disjoint held-out snapshot before making any recommendation.
 
 Continuous/provisional streaming adjudication, invented-text reconstruction,
 concurrent ASR scheduling, persistent ASR workers, and GPU scheduling remain

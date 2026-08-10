@@ -121,6 +121,33 @@ if [[ ${NATIVE_ASR_TEST_TWO_SPANS:-0} == 1 ]]; then
   exit 0
 fi
 
+if [[ ${NATIVE_ASR_TEST_BOUNDARY_CONFLICT:-0} == 1 ]]; then
+  case $image in
+    asr-nemo-speech) text='A CAT C' ;;
+    asr-sherpa-onnx) text='A DOG X' ;;
+    asr-whisper-cpp) text='A FOX C' ;;
+    *) exit 9 ;;
+  esac
+  jq -cn --arg runtime "$image" --arg text "$text" \
+    '{runtime:$runtime,segmentation:"none",text:$text}'
+  printf 'fake diagnostic: completed %s\n' "$image" >&2
+  printf 'NATIVE_ASR_TIME\t0.20\t0.10\t5000\t0\n' >&2
+  exit 0
+fi
+
+if [[ ${NATIVE_ASR_TEST_MAJORITY_ONLY:-0} == 1 ]]; then
+  case $image in
+    asr-nemo-speech|asr-whisper-cpp) text='Hello, brave world.' ;;
+    asr-sherpa-onnx) text='Hello world.' ;;
+    *) exit 9 ;;
+  esac
+  jq -cn --arg runtime "$image" --arg text "$text" \
+    '{runtime:$runtime,segmentation:"none",text:$text}'
+  printf 'fake diagnostic: completed %s\n' "$image" >&2
+  printf 'NATIVE_ASR_TIME\t0.20\t0.10\t5000\t0\n' >&2
+  exit 0
+fi
+
 case $image in
   asr-nemo-speech)
     jq -cn '{runtime:"nemo-speech",segmentation:"native-full-utterance",
@@ -135,7 +162,7 @@ case $image in
     ;;
   asr-whisper-cpp)
     jq -cn '{runtime:"whisper-cpp",segmentation:"native-windowing",
-      text:"Hello, brave world!",raw:{transcription:[{text:"Hello, brave world!",
+      text:"Hello, bold world!",raw:{transcription:[{text:"Hello, bold world!",
       timestamps:{from:"00:00:00.000",to:"00:00:01.250"}}]}}'
     ;;
   *) exit 9 ;;

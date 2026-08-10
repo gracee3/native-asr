@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+REPO_ROOT="$repo_root" PYTHONPATH="$repo_root/scripts/lib" python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+
+from ensemble import DEFAULT_MODELS, _manifest
+from snapshot_validation import SPLITS, _ranked_manifest, publish_snapshot, validate_runs
+
+
+root = Path(os.environ["REPO_ROOT"])
+records = _manifest(root / "manifests/models.lock")
+with tempfile.TemporaryDirectory() as temporary:
+    work = Path(temporary)
+    datasets = work / "datasets"
+    manifests = datasets / "manifests"
+    details = work / "details"
+    manifests.mkdir(parents=True)
+    details.mkdir()
+    manifest_digests = {}
+    selected_rows = {}
+    for split in SPLITS:
+        rows = [{
+            "utterance_id": f"{split}-u{index}", "split": split,
+            "source_sha256": hashlib.sha256(f"source-{split}-{index}".encode()).hexdigest(),
+            "reference": f"reference {index}",
+        } for index in range(3)]
+        path = manifests / f"{split}.jsonl"
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        manifest_digests[split] = hashlib.sha256(path.read_bytes()).hexdigest()
+        selected_rows[split] = _ranked_manifest(path, 1, 1)
+
+    runs = []
+    run_ids = []
+    for split in SPLITS:
+        for alias in DEFAULT_MODELS:
+            run_id = f"run-{len(run_ids)}"
+            run_ids.append(run_id)
+            source = selected_rows[split][0]
+            detail = [{
+                "schema_version": 2, "run_id": run_id, "sequence": 0,
+                "utterance_id": source["utterance_id"], "split": split,
+                "source_sha256": source["source_sha256"],
+                "reference_raw": source["reference"], "hypothesis_raw": "reference",
+                "exit_status": 0, "stderr": None,
+            }]
+            detail_path = details / f"{run_id}.jsonl"
+            detail_path.write_text(
+                json.dumps(detail[0], sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(detail_path.read_bytes()).hexdigest()
+            runs.append({
+                "schema_version": 2, "run_id": run_id, "status": "complete",
+                "model_alias": alias, "model_sha256": records[alias]["sha256"],
+                "dataset": split, "dataset_manifest_sha256": manifest_digests[split],
+                "dataset_digest": manifest_digests[split], "detail_sha256": digest,
+                "detail_path": str(detail_path), "utterances": 1, "failures": 0,
+                "dirty_tree": False, "git_revision": "a" * 40,
+                "host_adapter_sha256": "b" * 64, "offset": 1, "limit": 1,
+                "options": {"subset": "sha256(utterance_id)", "offset": 1, "limit": 1},
+            })
+    ledger = work / "runs.jsonl"
+    ledger.write_text("".join(json.dumps(row) + "\n" for row in runs), encoding="utf-8")
+    validated, validated_details, metadata = validate_runs(
+        ledger, details, datasets, root / "manifests/models.lock", run_ids, 1, 1,
+    )
+    assert len(validated) == 6 and len(validated_details) == 6
+    assert metadata["selection"] == {
+        "ranking": "sha256(utterance_id)", "offset": 1, "limit": 1,
+    }
+    output = work / "reviewed"
+    publish_snapshot(output, validated, validated_details, metadata)
+    assert (output / "snapshot.json").is_file()
+    assert len(list((output / "details").glob("*.jsonl"))) == 6
+    try:
+        publish_snapshot(output, validated, validated_details, metadata)
+    except ValueError as error:
+        assert "already exists" in str(error)
+    else:
+        raise AssertionError("snapshot publication overwrote an existing destination")
+
+    runs[0]["options"]["offset"] = 0
+    ledger.write_text("".join(json.dumps(row) + "\n" for row in runs), encoding="utf-8")
+    try:
+        validate_runs(ledger, details, datasets, root / "manifests/models.lock", run_ids, 1, 1)
+    except ValueError as error:
+        assert "offset/limit" in str(error)
+    else:
+        raise AssertionError("snapshot validation accepted a wrong offset")
+
+print("snapshot validation unit tests: ok")
+PY

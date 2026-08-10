@@ -6,14 +6,18 @@ repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHONPATH="$repo_root/scripts/lib" python3 - <<'PY'
 import copy
 
-from adjudication_benchmark import summarize_model
+from adjudication_benchmark import summarize_evaluation, summarize_model
 from ensemble import (
+    ADJUDICATION_POLICY_ID,
+    BoundaryPathConflict,
     add_native_timing,
     adjudication_prompt,
+    adjudication_spans,
     build_consensus,
     lexical_tokens,
     render_adjudicated,
     validate_adjudication_choices,
+    validate_boundary_paths,
 )
 
 
@@ -57,6 +61,7 @@ assert fallback["text"] == "A CAT C"
 column = next(column for column in fallback["columns"] if column["unresolved"])
 assert column["decision"] == "primary_fallback"
 assert column["selected"]["model_alias"] == "primary"
+assert len(adjudication_spans(fallback)) == 1
 
 # Native word times remain word times; segment spans remain explicitly coarse.
 nemo = track("nemo", "one two", {
@@ -85,7 +90,8 @@ unavailable = track("none", "one", {"text": "one"})
 assert unavailable["timing_basis"] == "unavailable"
 assert unavailable["normalized_tokens"][0]["timing"] is None
 
-# Consecutive non-unanimous columns are emitted as one contextualized span.
+# All disagreements keep their established grouping, while only consecutive
+# primary fallbacks form adjudication tasks. The majority column is immutable.
 grouped = build_consensus([
     track("primary", "A B C D E"),
     track("second", "A X Y D E"),
@@ -96,10 +102,15 @@ span = grouped["disagreements"][0]
 assert span["end_column_exclusive"] - span["start_column"] == 2
 assert span["context"] == {"before": "A", "after": "D E"}
 assert span["unresolved"]
+tie_spans = adjudication_spans(grouped)
+assert len(tie_spans) == 1
+assert tie_spans[0]["start_column"] == span["start_column"] + 1
+assert tie_spans[0]["context"] == {"before": "A X", "after": "D E"}
 
 # Adjudication prompts carry exact candidates and accept only one bounded
 # decision per disagreement column.
 prompt = adjudication_prompt(fallback, fallback["disagreements"][0])
+assert prompt["policy_id"] == ADJUDICATION_POLICY_ID
 assert prompt["input"]["context"] == {"before_tokens": ["A"], "after_tokens": ["C"]}
 assert prompt["input"]["columns"][0]["candidates"] == ["CAT", "DOG", "FOX"]
 response = {
@@ -112,28 +123,66 @@ fallback_tracks = [track("primary", "A CAT C"), track("second", "A DOG C"),
                    track("third", "A FOX C")]
 assert render_adjudicated(fallback, fallback_tracks, {1: 1}) == "A DOG C"
 
-# A track deletion is selectable; abstention preserves deterministic consensus.
-deletion_prompt = adjudication_prompt(inserted, inserted["disagreements"][0])
+# A deletion inside a genuine three-way tie is selectable; abstention preserves
+# deterministic consensus. A 2-of-3 insertion disagreement is not eligible.
+assert adjudication_spans(inserted) == []
+deletion_tracks = [track("primary", "A B C"), track("second", "A C"),
+                   track("third", "A D C")]
+deletion_tie = build_consensus(deletion_tracks)
+deletion_span = adjudication_spans(deletion_tie)[0]
+deletion_prompt = adjudication_prompt(deletion_tie, deletion_span)
 deletion_response = {
     "span_index": 0,
-    "decisions": [{"column_index": 1, "candidate_index": 0, "reason": "grammar"}],
+    "decisions": [{"column_index": 1, "candidate_index": 1, "reason": "grammar"}],
 }
 validate_adjudication_choices(deletion_prompt, deletion_response)
-inserted_tracks = [track("primary", "A C"), track("second", "A B C"),
-                   track("third", "A B C")]
-assert render_adjudicated(inserted, inserted_tracks, {1: 0}) == "A C"
+assert render_adjudicated(deletion_tie, deletion_tracks, {1: 1}) == "A C"
 abstain_response = {
     "span_index": 0,
     "decisions": [{"column_index": 1, "candidate_index": -1, "reason": "abstain"}],
 }
 validate_adjudication_choices(deletion_prompt, abstain_response)
-assert render_adjudicated(inserted, inserted_tracks, {1: -1}) == inserted["text"]
+assert render_adjudicated(deletion_tie, deletion_tracks, {1: -1}) == deletion_tie["text"]
 
-# Choosing a normalized consensus supporter cannot replace its surface form.
+# Protected normalized majorities retain their deterministic surface form.
 surface_tracks = [track("primary", "Hello, color."), track("second", "Hello, colour!"),
                   track("third", "Hello, colour?")]
 surface_consensus = build_consensus(surface_tracks)
-assert render_adjudicated(surface_consensus, surface_tracks, {1: 2}) == "Hello, colour!"
+assert render_adjudicated(surface_consensus, surface_tracks, {}) == "Hello, colour!"
+
+# Prompt construction and rendering independently refuse protected majority
+# columns, so an internal caller cannot opt into majority rewriting.
+try:
+    adjudication_prompt(inserted, inserted["disagreements"][0])
+except ValueError as error:
+    assert "protected" in str(error)
+else:
+    raise AssertionError("a majority disagreement became an adjudication prompt")
+try:
+    render_adjudicated(inserted, [track("primary", "A C"), track("second", "A B C"),
+                                  track("third", "A B C")], {1: 0})
+except ValueError as error:
+    assert "protected" in str(error)
+else:
+    raise AssertionError("rendering allowed a majority override")
+
+# Explicit edge selections must agree with protected neighboring consensus.
+boundary_tracks = [track("primary", "A CAT C"), track("second", "A DOG X"),
+                   track("third", "A FOX C")]
+boundary = build_consensus(boundary_tracks)
+boundary_span = adjudication_spans(boundary)[0]
+boundary_prompt = adjudication_prompt(boundary, boundary_span)
+boundary_choices = validate_adjudication_choices(boundary_prompt, {
+    "span_index": 0,
+    "decisions": [{"column_index": 1, "candidate_index": 1, "reason": "grammar"}],
+})
+try:
+    validate_boundary_paths(boundary, boundary_span, boundary_choices)
+except BoundaryPathConflict as error:
+    assert str(error) == "boundary_path_conflict"
+else:
+    raise AssertionError("a conflicting protected boundary was accepted")
+assert render_adjudicated(boundary, boundary_tracks, {1: 1}) == boundary["text"]
 
 # Duplicate, missing, malformed, out-of-bounds, and inconsistent decisions fail closed.
 bad_responses = [
@@ -167,8 +216,8 @@ benchmark_repeat = {
     "combined_errors": 90,
     "decisions_sha256": "same",
     "decisions": [{"timing": {"wall_seconds": 1.0}}],
-    "validated_spans": 138,
-    "fallback_spans": 3,
+    "validated_spans": 22,
+    "fallback_spans": 0,
     "execution": {
         "load_seconds": 1.0,
         "prompt_tokens": 10,
@@ -182,11 +231,19 @@ benchmark_repeat = {
 benchmark_repeat_2 = copy.deepcopy(benchmark_repeat)
 benchmark_repeat_2["repeat"] = 2
 benchmark_repeat_2["execution"]["peak_rss_kb"] = None
-summary = summarize_model("test", [benchmark_repeat, benchmark_repeat_2])
+baseline = {"librispeech-test-clean": 37, "librispeech-test-other": 54}
+summary = summarize_evaluation([benchmark_repeat, benchmark_repeat_2], baseline)
 assert summary["qualifies"] and summary["metrics"]["peak_rss_kb"] == 1234
 benchmark_repeat["execution"]["peak_rss_kb"] = None
-summary = summarize_model("test", [benchmark_repeat, benchmark_repeat_2])
+summary = summarize_evaluation([benchmark_repeat, benchmark_repeat_2], baseline)
 assert summary["metrics"]["peak_rss_kb"] is None
+model_summary = summarize_model(
+    "test",
+    {"calibration": [benchmark_repeat, benchmark_repeat_2],
+     "validation": [benchmark_repeat, benchmark_repeat_2]},
+    {"calibration": baseline, "validation": baseline},
+)
+assert model_summary["qualifies"]
 
 print("ensemble unit tests: ok")
 PY

@@ -260,14 +260,14 @@ Opt in to a local llama.cpp adjudicator with a third Just argument:
 just ensemble recording.m4a recording.audit llm:ministral-3b-instruct-2512
 ```
 
-The LLM can select only exact per-column ASR tokens or deletions, or abstain.
-Unanimous text bypasses it, every response is independently validated, and any
+The LLM can select only exact per-column ASR tokens or deletions, or abstain,
+inside genuine 1-1-1 ties. Unanimous and 2-of-3 majority columns are immutable;
+every response and protected span boundary is independently validated, and any
 bad span uses preserved deterministic consensus. Successful schema-2 bundles
 always include `transcript.txt`, `consensus.txt`, and `adjudication.json`.
-The repeated 2026-08-10 bake-off found both candidates deterministic but below
-the accuracy publication gate, so no long-form alias is currently recommended;
-see the
-[`blocked bake-off evidence`](benchmarks/published/2026-08-10-adjudication-bakeoff/README.md).
+The earlier broader-span bake-off remains historical evidence; the isolated
+tie-only policy requires both calibration and held-out gates before a long-form
+alias can be recommended.
 
 ## Benchmarking
 
@@ -288,6 +288,8 @@ every fingerprint matches:
 just datasets
 just prepare-datasets
 just benchmark-set whisper:small.en librispeech-test-clean
+./scripts/benchmark-set --offset 100 --limit 100 \
+  whisper:small.en librispeech-test-clean
 just bench-suite staged
 ```
 

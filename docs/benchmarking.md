@@ -66,7 +66,9 @@ utterance ID, split, paths, raw reference, duration, speaker, and source digest.
 
 `scripts/benchmark-set` ranks subset candidates by SHA-256 of utterance ID and
 scores independent reference/hypothesis pairs with a fingerprinted
-runtime-specific batching policy. Most runtimes use one container and one model
+runtime-specific batching policy. `--offset N` skips the first `N` ranks before
+`--limit` is applied; both values are part of run metadata and the resume
+fingerprint. Most runtimes use one container and one model
 load for the set. Sherpa Parakeet uses bounded groups and the pinned Silero VAD
 path for utterances over 20 seconds to avoid the upstream offline CLI's large
 concurrent-stream and long-utterance failure modes. An exit-zero empty group is
@@ -87,25 +89,34 @@ peak RSS, RTF, failures, and event-order validation. Paced runs report partial
 and finalization lag; unpaced AMI runs leave those latency fields null rather
 than subtracting media time from throughput time.
 
-## Adjudicator bake-off
+Six completed cells can be reviewed with
+`scripts/review-benchmark-snapshot --output DIR --offset N --limit N RUN_ID…`.
+The helper requires the exact three ensemble aliases on both LibriSpeech
+splits, one clean implementation revision, complete identical ordering, locked
+model/dataset/source/detail digests, and exact SHA-256 rank coverage. It stages
+and atomically publishes `runs.jsonl`, all six details, and `snapshot.json`.
 
-`scripts/adjudication-benchmark --output RESULT.json` replays the three locked
-ASR hypotheses for all 200 utterances in the committed snapshot. It starts one
-persistent worker per adjudicator/repeat, validates all 141 disagreement spans
-and 244 non-unanimous columns, and runs both Ministral candidates twice. The
-result retains every validated decision or fallback plus per-split errors, load time,
-prompt/generation throughput, span p50/p95 latency, CPU, and peak RSS.
+## Tie-only adjudicator evaluation
 
-Repeated decision digests must match. A candidate must be no worse than 37
-`test-clean` errors and 54 `test-other` errors, and must strictly improve the
-combined 91-error baseline. Ranking is combined errors, then p95 latency, then
-peak RSS. The runner exits nonzero and records a blocked recommendation when no
-candidate qualifies. Selection-only oracle ceilings are 27 and 40 errors.
+`scripts/adjudication-benchmark --output RESULT.json` replays both the original
+calibration snapshot and the disjoint held-out snapshot. Policy
+`primary-fallback-only-v1` evaluates only contiguous genuine 1-1-1 ties while
+protecting all majority columns. It runs both Ministral candidates twice per
+snapshot and retains every decision or explicit fallback plus per-split errors,
+load time, prompt/generation throughput, span p50/p95 latency, CPU, and peak RSS
+in schema 2.
+
+For each evaluation, repeated decisions and scores must match, no span may fall
+back, neither split may exceed its dynamically recomputed deterministic
+baseline, and combined errors must strictly improve. A candidate qualifies only
+by passing both evaluations. Ranking uses held-out combined errors, then held-
+out p95 latency, then peak RSS. The runner exits nonzero and records a blocked
+recommendation when no candidate qualifies.
 
 Long CPU runs may be resumed with `--reuse-model-result PREVIOUS.json`. Reuse
-is accepted only when the snapshot hash and shape, repeat count, model digest,
-and llama.cpp revision match; scores, metrics, decision digests, qualification,
-and cross-model ranking are recomputed from the embedded repeat records.
+is accepted only when both snapshot hashes, repeat count, policy ID, model
+digest, and llama.cpp revision match; scores, metrics, decision digests,
+qualification, and cross-model ranking are recomputed from repeat records.
 
 `just ensemble-fixture OUTPUT_DIR` recreates the locked eight-sample public
 long-form fixture from prepared dataset manifests. It verifies the exact
@@ -120,7 +131,7 @@ versioned in
 [`benchmarks/published/2026-08-09-librispeech-100`](../benchmarks/published/2026-08-09-librispeech-100/README.md).
 The initial two-model full `test-clean` records are versioned separately in
 [`benchmarks/published/2026-08-09-librispeech-test-clean-pair`](../benchmarks/published/2026-08-09-librispeech-test-clean-pair/README.md).
-The repeated bounded-adjudicator bake-off is in
+The earlier repeated bounded-adjudicator bake-off is in
 [`benchmarks/published/2026-08-10-adjudication-bakeoff`](../benchmarks/published/2026-08-10-adjudication-bakeoff/README.md).
 Both candidates were deterministic but failed the accuracy gates, so the
 snapshot records a blocked recommendation and no recommended-profile

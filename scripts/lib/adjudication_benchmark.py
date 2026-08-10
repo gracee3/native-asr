@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repeatable real-model bake-off over the committed 200-utterance snapshot."""
+"""Repeatable tie-only local-LLM evaluation on calibration and validation snapshots."""
 
 from __future__ import annotations
 
@@ -16,7 +16,9 @@ import time
 from typing import Any
 
 from ensemble import (
+    ADJUDICATION_POLICY_ID,
     ADJUDICATION_PROTOCOL_VERSION,
+    BoundaryPathConflict,
     DEFAULT_MODELS,
     EnsembleJob,
     LLAMA_CPP_REVISION,
@@ -25,11 +27,13 @@ from ensemble import (
     _sha256,
     _write_json,
     adjudication_prompt,
+    adjudication_spans,
     adjudicator_configuration,
     build_consensus,
     lexical_tokens,
     render_adjudicated,
     validate_adjudication_choices,
+    validate_boundary_paths,
 )
 from evaluation import errors
 
@@ -39,17 +43,9 @@ DEFAULT_ADJUDICATORS = (
     "llm:ministral-8b-instruct-2512",
 )
 SPLITS = ("librispeech-test-clean", "librispeech-test-other")
-EXPECTED = {
-    "spans": 141,
-    "columns": 244,
-    "baseline_errors": {
-        "librispeech-test-clean": 37,
-        "librispeech-test-other": 54,
-    },
-    "oracle_errors": {
-        "librispeech-test-clean": 27,
-        "librispeech-test-other": 40,
-    },
+CALIBRATION_BASELINE = {
+    "librispeech-test-clean": 37,
+    "librispeech-test-other": 54,
 }
 
 
@@ -57,22 +53,33 @@ def load_snapshot(snapshot: Path) -> tuple[dict[str, list[dict[str, Any]]], list
     aliases = list(DEFAULT_MODELS)
     runs = [json.loads(line) for line in (snapshot / "runs.jsonl").read_text(
         encoding="utf-8"
-    ).splitlines()]
+    ).splitlines() if line]
     corpora: dict[str, list[dict[str, Any]]] = {}
     for split in SPLITS:
         tables = []
         for alias in aliases:
-            run = next(row for row in runs
-                       if row["dataset"] == split and row["model_alias"] == alias)
-            rows = [json.loads(line) for line in (
-                snapshot / "details" / f"{run['run_id']}.jsonl"
-            ).read_text(encoding="utf-8").splitlines()]
+            matches = [row for row in runs
+                       if row.get("dataset") == split and row.get("model_alias") == alias]
+            if len(matches) != 1 or matches[0].get("status") != "complete":
+                raise RuntimeError(f"snapshot must contain one complete {alias} / {split} run")
+            run = matches[0]
+            detail = snapshot / "details" / f"{run['run_id']}.jsonl"
+            rows = [json.loads(line) for line in detail.read_text(
+                encoding="utf-8"
+            ).splitlines() if line]
+            if len(rows) != run.get("utterances") or any(
+                row.get("run_id") != run["run_id"] or row.get("exit_status") != 0
+                for row in rows
+            ):
+                raise RuntimeError(f"snapshot detail is incomplete: {run['run_id']}")
             tables.append({row["utterance_id"]: row for row in rows})
         if not (list(tables[0]) == list(tables[1]) == list(tables[2])):
             raise RuntimeError(f"snapshot utterance order differs across tracks: {split}")
         corpus = []
         for utterance_id in tables[0]:
             source_rows = [table[utterance_id] for table in tables]
+            if len({(row["reference_raw"], row["source_sha256"]) for row in source_rows}) != 1:
+                raise RuntimeError(f"snapshot source identity differs: {split} / {utterance_id}")
             tracks = [{
                 "model_alias": alias,
                 "normalized_tokens": lexical_tokens(row["hypothesis_raw"]),
@@ -87,11 +94,39 @@ def load_snapshot(snapshot: Path) -> tuple[dict[str, list[dict[str, Any]]], list
     return corpora, aliases
 
 
+def evaluation_shape(corpora: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    baseline = {}
+    tie_spans = tie_columns = protected_majority = non_unanimous = 0
+    for split, corpus in corpora.items():
+        baseline[split] = sum(
+            errors(item["reference"], item["consensus"]["text"])["errors"]
+            for item in corpus
+        )
+        for item in corpus:
+            consensus = item["consensus"]
+            spans = adjudication_spans(consensus)
+            tie_spans += len(spans)
+            tie_columns += sum(
+                span["end_column_exclusive"] - span["start_column"] for span in spans
+            )
+            protected_majority += (
+                consensus["decision_counts"]["majority_token"]
+                + consensus["decision_counts"]["majority_deletion"]
+            )
+            non_unanimous += consensus["decision_counts"]["non_unanimous"]
+    return {
+        "utterances": sum(len(corpus) for corpus in corpora.values()),
+        "eligible_tie_spans": tie_spans,
+        "eligible_tie_columns": tie_columns,
+        "protected_majority_columns": protected_majority,
+        "non_unanimous_columns": non_unanimous,
+        "deterministic_baseline_errors": baseline,
+    }
+
+
 def benchmark_request(
-    job: EnsembleJob, process: subprocess.Popen[str], prompt: dict[str, Any],
+    job: EnsembleJob, process: subprocess.Popen[str], prompt: dict[str, Any], request_id: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    span_index = prompt["input"]["span_index"]
-    request_id = f"span-{span_index}"
     request = {
         "command": "adjudicate",
         "request_id": request_id,
@@ -137,9 +172,7 @@ def one_repeat(
         records, env, adjudicator_alias=alias, adjudication_timeout=timeout,
     )
     job.stage = stage
-    job.adjudicator = adjudicator_configuration(
-        root, alias, records, env, job.engine
-    )
+    job.adjudicator = adjudicator_configuration(root, alias, records, env, job.engine)
     if not job.adjudicator["available"]:
         raise RuntimeError(job.adjudicator["unavailable_reason"])
     process: subprocess.Popen[str] | None = None
@@ -158,7 +191,7 @@ def one_repeat(
                 consensus = utterance["consensus"]
                 key = (split, utterance["utterance_id"])
                 selected_by_utterance[key] = {}
-                for span in consensus["disagreements"]:
+                for span in adjudication_spans(consensus):
                     prompt = adjudication_prompt(consensus, span)
                     requests.append({
                         "sort_key": (
@@ -167,32 +200,34 @@ def one_repeat(
                         ),
                         "split": split,
                         "utterance_id": utterance["utterance_id"],
-                        "span_index": span["index"],
+                        "span": span,
+                        "consensus": consensus,
                         "prompt": prompt,
                     })
-        # Requests with the largest response schemas run last. If a bounded request
-        # times out and the JSONL stream can no longer be resynchronized, this keeps
-        # the failure local to the few genuinely oversized spans.
         requests.sort(key=lambda item: item["sort_key"])
         worker_lost_reason = None
-        for request in requests:
+        for sequence, request in enumerate(requests):
             timing = None
             validated = None
             fallback_reason = worker_lost_reason
+            fallback_code = "worker_unavailable" if worker_lost_reason else None
+            request_id = f"request-{sequence}"
             started = time.monotonic()
             if worker_lost_reason is None:
                 try:
                     assert process is not None
                     validated, timing = benchmark_request(
-                        job, process, request["prompt"]
+                        job, process, request["prompt"], request_id
+                    )
+                    validate_boundary_paths(
+                        request["consensus"], request["span"], validated
                     )
                 except TimeoutError as error:
                     timing = {"wall_seconds": time.monotonic() - started}
-                    fallback_reason = str(error)
+                    fallback_reason, fallback_code = str(error), "timeout"
                     drain_started = time.monotonic()
                     try:
                         assert process is not None
-                        request_id = f"span-{request['prompt']['input']['span_index']}"
                         job._drain_late_response(process, request_id)
                         timing["drain_wall_seconds"] = time.monotonic() - drain_started
                         timing["late_response_discarded"] = True
@@ -201,15 +236,22 @@ def one_repeat(
                         worker_lost_reason = f"late response drain failed: {drain_error}"
                         worker_metrics = job._stop_worker(process, force=True)
                         process = None
-                except (BrokenPipeError, OSError) as error:
+                except BoundaryPathConflict as error:
+                    timing = timing or {"wall_seconds": time.monotonic() - started}
+                    fallback_reason, fallback_code = str(error), "boundary_path_conflict"
+                    validated = None
+                except (BrokenPipeError, OSError, RuntimeError) as error:
                     timing = {"wall_seconds": time.monotonic() - started}
                     fallback_reason = f"worker failure: {error}"
+                    fallback_code = "worker_failure"
                     worker_lost_reason = fallback_reason
                     worker_metrics = job._stop_worker(process, force=True)
                     process = None
                 except (json.JSONDecodeError, ValueError, TypeError, KeyError) as error:
                     timing = {"wall_seconds": time.monotonic() - started}
                     fallback_reason = f"invalid response: {error}"
+                    fallback_code = "invalid_response"
+                    validated = None
             if validated is not None:
                 selected = selected_by_utterance[
                     (request["split"], request["utterance_id"])
@@ -219,10 +261,11 @@ def one_repeat(
             record = {
                 "split": request["split"],
                 "utterance_id": request["utterance_id"],
-                "span_index": request["span_index"],
+                "span_index": request["span"]["index"],
                 "choices": validated,
                 "timing": timing,
                 "fallback_reason": fallback_reason,
+                "fallback_code": fallback_code,
             }
             decisions.append(record)
             span_records.append(record)
@@ -252,7 +295,7 @@ def one_repeat(
         span_records,
     )
     canonical = [{key: decision[key] for key in (
-        "split", "utterance_id", "span_index", "choices", "fallback_reason",
+        "split", "utterance_id", "span_index", "choices", "fallback_code",
     )} for decision in decisions]
     digest = hashlib.sha256(_json_bytes(canonical)).hexdigest()
     return {
@@ -274,7 +317,19 @@ def one_repeat(
     }
 
 
-def summarize_model(alias: str, repeats: list[dict[str, Any]]) -> dict[str, Any]:
+def _percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+
+def summarize_evaluation(
+    repeats: list[dict[str, Any]], baseline: dict[str, int],
+) -> dict[str, Any]:
     decision_digests = {item["decisions_sha256"] for item in repeats}
     score_shapes = {json.dumps(item["scores"], sort_keys=True) for item in repeats}
     latencies = [
@@ -283,47 +338,66 @@ def summarize_model(alias: str, repeats: list[dict[str, Any]]) -> dict[str, Any]
         if isinstance(decision.get("timing"), dict)
         and isinstance(decision["timing"].get("wall_seconds"), (int, float))
     ]
-    prompt_tokens = sum(repeat["execution"]["prompt_tokens"] for repeat in repeats)
-    generated_tokens = sum(repeat["execution"]["generated_tokens"] for repeat in repeats)
-    prompt_seconds = sum(repeat["execution"]["prompt_seconds"] for repeat in repeats)
-    generation_seconds = sum(repeat["execution"]["generation_seconds"] for repeat in repeats)
-    peak_rss_values = [
-        repeat["execution"]["peak_rss_kb"] for repeat in repeats
-        if repeat["execution"]["peak_rss_kb"] is not None
-    ]
-    ordered = sorted(latencies)
-    def percentile(fraction: float) -> float:
-        position = (len(ordered) - 1) * fraction
-        lower = int(position)
-        upper = min(lower + 1, len(ordered) - 1)
-        return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+    executions = [repeat["execution"] or {} for repeat in repeats]
+    prompt_tokens = sum(item.get("prompt_tokens", 0) for item in executions)
+    generated_tokens = sum(item.get("generated_tokens", 0) for item in executions)
+    prompt_seconds = sum(item.get("prompt_seconds", 0) for item in executions)
+    generation_seconds = sum(item.get("generation_seconds", 0) for item in executions)
+    peak_rss_values = [item["peak_rss_kb"] for item in executions
+                       if item.get("peak_rss_kb") is not None]
     first = repeats[0]
-    qualifies = (
-        len(decision_digests) == 1
-        and len(score_shapes) == 1
-        and first["scores"][SPLITS[0]]["errors"] <= EXPECTED["baseline_errors"][SPLITS[0]]
-        and first["scores"][SPLITS[1]]["errors"] <= EXPECTED["baseline_errors"][SPLITS[1]]
-        and first["combined_errors"] < sum(EXPECTED["baseline_errors"].values())
-    )
+    identical_decisions = len(decision_digests) == 1
+    identical_scores = len(score_shapes) == 1
+    zero_fallbacks = all(repeat["fallback_spans"] == 0 for repeat in repeats)
+    split_not_worse = all(first["scores"][split]["errors"] <= baseline[split]
+                          for split in SPLITS)
+    strict_combined_improvement = first["combined_errors"] < sum(baseline.values())
+    qualifies = (identical_decisions and identical_scores and zero_fallbacks
+                 and split_not_worse and strict_combined_improvement)
     return {
-        "alias": alias,
-        "provenance": repeats[0]["provenance"],
-        "identical_validated_decisions": len(decision_digests) == 1,
-        "identical_scores": len(score_shapes) == 1,
+        "identical_validated_decisions": identical_decisions,
+        "identical_scores": identical_scores,
+        "zero_fallback_spans": zero_fallbacks,
+        "split_not_worse_than_baseline": split_not_worse,
+        "strict_combined_improvement": strict_combined_improvement,
+        "qualifies": qualifies,
         "validated_spans": [repeat["validated_spans"] for repeat in repeats],
         "fallback_spans": [repeat["fallback_spans"] for repeat in repeats],
-        "qualifies": qualifies,
         "scores": first["scores"],
         "combined_errors": first["combined_errors"],
         "metrics": {
-            "load_seconds": [repeat["execution"]["load_seconds"] for repeat in repeats],
-            "prompt_tokens_per_second": prompt_tokens / prompt_seconds,
-            "generation_tokens_per_second": generated_tokens / generation_seconds,
-            "span_latency_seconds": {"p50": percentile(0.50), "p95": percentile(0.95)},
-            "cpu_seconds": [repeat["execution"]["cpu_seconds"] for repeat in repeats],
+            "load_seconds": [item.get("load_seconds") for item in executions],
+            "prompt_tokens_per_second": (
+                prompt_tokens / prompt_seconds if prompt_seconds > 0 else None
+            ),
+            "generation_tokens_per_second": (
+                generated_tokens / generation_seconds if generation_seconds > 0 else None
+            ),
+            "span_latency_seconds": {
+                "p50": _percentile(latencies, 0.50),
+                "p95": _percentile(latencies, 0.95),
+            },
+            "cpu_seconds": [item.get("cpu_seconds") for item in executions],
             "peak_rss_kb": max(peak_rss_values, default=None),
         },
         "repeats": repeats,
+    }
+
+
+def summarize_model(
+    alias: str, repeats_by_evaluation: dict[str, list[dict[str, Any]]],
+    baselines: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    evaluations = {
+        name: summarize_evaluation(repeats, baselines[name])
+        for name, repeats in repeats_by_evaluation.items()
+    }
+    return {
+        "alias": alias,
+        "provenance": repeats_by_evaluation["calibration"][0]["provenance"],
+        "policy_id": ADJUDICATION_POLICY_ID,
+        "qualifies": all(item["qualifies"] for item in evaluations.values()),
+        "evaluations": evaluations,
     }
 
 
@@ -331,17 +405,31 @@ def parser() -> argparse.ArgumentParser:
     root = Path(__file__).resolve().parents[2]
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--output", required=True, type=Path)
-    result.add_argument("--snapshot", type=Path, default=(
+    result.add_argument("--calibration-snapshot", type=Path, default=(
         root / "benchmarks/published/2026-08-09-librispeech-100"
+    ))
+    result.add_argument("--validation-snapshot", type=Path, default=(
+        root / "benchmarks/published/2026-08-10-librispeech-heldout-100"
     ))
     result.add_argument("--adjudicator", action="append", default=[])
     result.add_argument(
         "--reuse-model-result", action="append", default=[], type=Path,
-        help="reuse a previously completed model result after strict provenance checks",
+        help="reuse schema-2 model repeats after strict snapshot and runtime checks",
     )
     result.add_argument("--repeats", type=int, default=2)
     result.add_argument("--timeout", type=float, default=30.0)
     return result
+
+
+def _snapshot_metadata(
+    root: Path, path: Path, shape: dict[str, Any], aliases: list[str],
+) -> dict[str, Any]:
+    return {
+        "path": str(path.relative_to(root)),
+        "runs_sha256": _sha256(path / "runs.jsonl"),
+        **shape,
+        "asr_aliases": aliases,
+    }
 
 
 def main() -> int:
@@ -353,7 +441,10 @@ def main() -> int:
     if os.path.lexists(output):
         raise SystemExit(f"error: output already exists: {output}")
     root = Path(__file__).resolve().parents[2]
-    snapshot = args.snapshot.expanduser().resolve(strict=True)
+    snapshot_paths = {
+        "calibration": args.calibration_snapshot.expanduser().resolve(strict=True),
+        "validation": args.validation_snapshot.expanduser().resolve(strict=True),
+    }
     env = dict(os.environ)
     records = _manifest(Path(env.get(
         "NATIVE_ASR_MODEL_MANIFEST", root / "manifests/models.lock"
@@ -363,31 +454,38 @@ def main() -> int:
         if alias not in records or records[alias]["runtime"] != "llama-cpp":
             raise SystemExit(f"error: invalid adjudicator alias: {alias}")
     subprocess.run([str(root / "scripts/verify-models"), *aliases], env=env, check=True)
-    corpora, asr_aliases = load_snapshot(snapshot)
-    spans = sum(len(item["consensus"]["disagreements"])
-                for corpus in corpora.values() for item in corpus)
-    columns = sum(item["consensus"]["decision_counts"]["non_unanimous"]
-                  for corpus in corpora.values() for item in corpus)
-    baseline = {}
-    for split, corpus in corpora.items():
-        count = sum(errors(item["reference"], item["consensus"]["text"])["errors"]
-                    for item in corpus)
-        baseline[split] = count
-    if spans != EXPECTED["spans"] or columns != EXPECTED["columns"]:
-        raise SystemExit(f"error: snapshot shape changed: {spans} spans, {columns} columns")
-    if baseline != EXPECTED["baseline_errors"]:
-        raise SystemExit(f"error: deterministic baseline changed: {baseline}")
+
+    corpora = {}
+    shapes = {}
+    snapshot_metadata = {}
+    asr_aliases = None
+    for name, path in snapshot_paths.items():
+        corpora[name], loaded_aliases = load_snapshot(path)
+        if asr_aliases is not None and loaded_aliases != asr_aliases:
+            raise SystemExit("error: ASR aliases differ between evaluation snapshots")
+        asr_aliases = loaded_aliases
+        shapes[name] = evaluation_shape(corpora[name])
+        snapshot_metadata[name] = _snapshot_metadata(
+            root, path, shapes[name], loaded_aliases
+        )
+    if shapes["calibration"]["deterministic_baseline_errors"] != CALIBRATION_BASELINE:
+        raise SystemExit(
+            "error: disabled-adjudication calibration regression changed: "
+            f"{shapes['calibration']['deterministic_baseline_errors']}"
+        )
+    baselines = {
+        name: shape["deterministic_baseline_errors"] for name, shape in shapes.items()
+    }
 
     reused_models: dict[str, dict[str, Any]] = {}
     reuse_sources = []
     for reuse_path_arg in args.reuse_model_result:
         reuse_path = reuse_path_arg.expanduser().resolve(strict=True)
         reused = json.loads(reuse_path.read_text(encoding="utf-8"))
-        reused_snapshot = reused.get("snapshot") if isinstance(reused, dict) else None
-        if (not isinstance(reused_snapshot, dict)
-                or reused_snapshot.get("runs_sha256") != _sha256(snapshot / "runs.jsonl")
-                or reused_snapshot.get("spans") != spans
-                or reused_snapshot.get("non_unanimous_columns") != columns):
+        if reused.get("schema_version") != 2 or any(
+            reused.get("evaluations", {}).get(name, {}).get("snapshot", {}).get("runs_sha256")
+            != snapshot_metadata[name]["runs_sha256"] for name in snapshot_paths
+        ):
             raise SystemExit(f"error: reused result has different snapshot provenance: {reuse_path}")
         source_aliases = []
         for model in reused.get("models", []):
@@ -396,23 +494,27 @@ def main() -> int:
                 continue
             if alias in reused_models:
                 raise SystemExit(f"error: duplicate reused model result: {alias}")
-            repeats = model.get("repeats", [])
-            if len(repeats) != args.repeats:
+            repeats_by_evaluation = {
+                name: model.get("evaluations", {}).get(name, {}).get("repeats", [])
+                for name in snapshot_paths
+            }
+            if any(len(repeats) != args.repeats
+                   for repeats in repeats_by_evaluation.values()):
                 raise SystemExit(f"error: reused model has the wrong repeat count: {alias}")
             if any(
                 repeat.get("provenance", {}).get("artifact", {}).get("sha256")
                 != records[alias]["sha256"]
                 or repeat.get("provenance", {}).get("runtime", {}).get("revision")
                 != LLAMA_CPP_REVISION
-                for repeat in repeats
+                or repeat.get("provenance", {}).get("policy", {}).get(
+                    "adjudication_policy_id"
+                ) != ADJUDICATION_POLICY_ID
+                for repeats in repeats_by_evaluation.values() for repeat in repeats
             ):
                 raise SystemExit(f"error: reused model provenance is stale: {alias}")
-            reused_models[alias] = summarize_model(alias, repeats)
+            reused_models[alias] = summarize_model(alias, repeats_by_evaluation, baselines)
             source_aliases.append(alias)
-        reuse_sources.append({
-            "sha256": _sha256(reuse_path),
-            "aliases": source_aliases,
-        })
+        reuse_sources.append({"sha256": _sha256(reuse_path), "aliases": source_aliases})
 
     models = []
     for alias in aliases:
@@ -420,31 +522,35 @@ def main() -> int:
             print(f"adjudication benchmark: reusing validated result for {alias}", flush=True)
             models.append(reused_models[alias])
             continue
-        repeats = []
-        for repeat in range(1, args.repeats + 1):
-            print(f"adjudication benchmark: {alias} repeat {repeat}", flush=True)
-            repeats.append(one_repeat(
-                root, records, env, alias, args.timeout, corpora, repeat
-            ))
-        models.append(summarize_model(alias, repeats))
+        repeats_by_evaluation = {}
+        for name in ("calibration", "validation"):
+            repeats = []
+            for repeat in range(1, args.repeats + 1):
+                print(f"adjudication benchmark: {alias} {name} repeat {repeat}", flush=True)
+                repeats.append(one_repeat(
+                    root, records, env, alias, args.timeout, corpora[name], repeat
+                ))
+            repeats_by_evaluation[name] = repeats
+        models.append(summarize_model(alias, repeats_by_evaluation, baselines))
+
     qualified = sorted(
         (model for model in models if model["qualifies"]),
         key=lambda model: (
-            model["combined_errors"],
-            (model["metrics"]["span_latency_seconds"]["p95"]
-             if model["metrics"]["span_latency_seconds"]["p95"] is not None
-             else float("inf")),
-            (model["metrics"]["peak_rss_kb"]
-             if model["metrics"]["peak_rss_kb"] is not None else float("inf")),
+            model["evaluations"]["validation"]["combined_errors"],
+            (model["evaluations"]["validation"]["metrics"]
+             ["span_latency_seconds"]["p95"] or float("inf")),
+            (model["evaluations"]["validation"]["metrics"]["peak_rss_kb"]
+             or float("inf")),
         ),
     )
     recommendation = {
         "status": "qualified" if qualified else "blocked",
         "alias": qualified[0]["alias"] if qualified else None,
-        "ranking_policy": "combined_errors_then_p95_latency_then_peak_rss",
+        "requires_calibration_and_validation": True,
+        "ranking_policy": "validation_combined_errors_then_p95_latency_then_peak_rss",
     }
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "git_revision": subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"], text=True,
@@ -454,20 +560,24 @@ def main() -> int:
             ["git", "-C", str(root), "status", "--porcelain"], text=True,
             capture_output=True, check=True,
         ).stdout),
-        "snapshot": {
-            "path": str(snapshot.relative_to(root)),
-            "runs_sha256": _sha256(snapshot / "runs.jsonl"),
-            "utterances": sum(len(corpus) for corpus in corpora.values()),
-            "spans": spans,
-            "non_unanimous_columns": columns,
-            "asr_aliases": asr_aliases,
+        "policy": {
+            "id": ADJUDICATION_POLICY_ID,
+            "protocol_version": ADJUDICATION_PROTOCOL_VERSION,
+            "eligible_columns": "contiguous_primary_fallback_only",
+            "protected_columns": "unanimous_and_two_of_three_majority",
+            "boundary_check": "protected_neighbor_track_agreement",
         },
-        "gates": {
-            "deterministic_baseline_errors": EXPECTED["baseline_errors"],
-            "selection_only_oracle_errors": EXPECTED["oracle_errors"],
-            "maximum_split_errors": EXPECTED["baseline_errors"],
-            "combined_must_be_less_than": sum(EXPECTED["baseline_errors"].values()),
-            "identical_validated_decisions_required": True,
+        "evaluations": {
+            name: {
+                "snapshot": snapshot_metadata[name],
+                "gates": {
+                    "maximum_split_errors": baselines[name],
+                    "combined_must_be_less_than": sum(baselines[name].values()),
+                    "identical_validated_decisions_required": True,
+                    "identical_scores_required": True,
+                    "zero_fallback_spans_required": True,
+                },
+            } for name in snapshot_paths
         },
         "models": models,
         "reused_model_results": reuse_sources,

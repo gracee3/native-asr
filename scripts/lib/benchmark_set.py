@@ -99,11 +99,14 @@ def main() -> None:
     parser.add_argument("model")
     parser.add_argument("dataset")
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--threads", type=int)
     parser.add_argument("--no-resume", action="store_true")
     args = parser.parse_args()
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
+    if args.offset < 0:
+        parser.error("--offset must be non-negative")
     if args.threads is not None and args.threads <= 0:
         parser.error("--threads must be positive")
 
@@ -119,8 +122,13 @@ def main() -> None:
         raise SystemExit(f"error: prepared dataset manifest is empty: {dataset_manifest}")
     utterances.sort(key=lambda row: (hashlib.sha256(row["utterance_id"].encode()).hexdigest(),
                                      row["utterance_id"]))
+    utterances = utterances[args.offset:]
     if args.limit:
         utterances = utterances[:args.limit]
+    if not utterances:
+        raise SystemExit(
+            f"error: --offset {args.offset} selects no utterances from {args.dataset}"
+        )
     image = {"sherpa-onnx": "asr-sherpa-onnx", "nemo-speech": "asr-nemo-speech",
              "moonshine": "asr-moonshine", "whisper-cpp": "asr-whisper-cpp"}[record["runtime"]]
     image_id = command_output([ENGINE, "image", "inspect", image, "--format", "{{.Id}}"])
@@ -131,7 +139,8 @@ def main() -> None:
                (args.threads or (4 if record["runtime"] == "nemo-speech" else (os.cpu_count() or 1))))
     options = {"threads": "runtime-managed" if record["runtime"] == "moonshine" else threads,
                "normalization": NORMALIZATION_VERSION, "batching": batch_policy(record),
-               "subset": "sha256(utterance_id)", "limit": args.limit}
+               "subset": "sha256(utterance_id)", "offset": args.offset,
+               "limit": args.limit}
     identity = {
         "schema_version": 2, "image_id": image_id, "model_alias": args.model,
         "model_sha256": record["sha256"], "dataset": args.dataset,
@@ -216,7 +225,9 @@ def main() -> None:
         "status": "complete" if totals["failures"] == 0 else "failed",
         "runtime": record["runtime"], "model_name": record["name"],
         "dataset_digest": identity["dataset_manifest_sha256"], "git_revision": git_revision,
-        "dirty_tree": dirty, "detail_path": str(destination), "utterances": len(utterances),
+        "dirty_tree": dirty, "detail_path": str(destination),
+        "detail_sha256": sha(destination), "offset": args.offset, "limit": args.limit,
+        "utterances": len(utterances),
         "total_audio_seconds": audio_seconds, "wall_seconds": wall_total,
         "cold_start_model_load_and_first_inference_seconds": cold_probe_wall,
         "batch_wall_seconds": batch.wall_seconds,

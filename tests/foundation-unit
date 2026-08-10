@@ -84,6 +84,7 @@ with tempfile.TemporaryDirectory() as raw:
     )
     assert benchmark_set.previous_complete("same")["run_id"] == "ok"
     assert benchmark_set.previous_complete("different") is None
+    assert benchmark_set.fingerprint({"offset": 0}) != benchmark_set.fingerprint({"offset": 100})
 
     # A dataset batch creates one runtime process and maps independent hypotheses.
     prepared = root / "prepared.wav"

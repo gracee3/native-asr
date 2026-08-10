@@ -75,7 +75,7 @@ ensemble audio output adjudicator="":
 ensemble-fixture output:
     @./scripts/recreate-long-form-fixture {{ quote(output) }}
 
-# Run both local-LLM candidates twice over the committed 200-utterance snapshot.
+# Run both local-LLM candidates twice over calibration and held-out snapshots.
 adjudication-benchmark output:
     @./scripts/adjudication-benchmark --output {{ quote(output) }}
 
