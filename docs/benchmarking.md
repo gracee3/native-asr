@@ -136,5 +136,10 @@ The earlier repeated bounded-adjudicator bake-off is in
 Both candidates were deterministic but failed the accuracy gates, so the
 snapshot records a blocked recommendation and no recommended-profile
 long-form result.
+The isolated tie-only calibration and disjoint held-out evaluation is in
+[`benchmarks/published/2026-08-10-tie-only-adjudication`](../benchmarks/published/2026-08-10-tie-only-adjudication/README.md).
+It also records a blocked recommendation: both candidates matched the dynamic
+baselines and had repeatable fallback spans, so the conditional fixture gate
+was not reached.
 Generated ledgers remain external by default; only reviewed snapshots derived
 from public evaluation corpora belong in that directory.

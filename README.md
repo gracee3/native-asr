@@ -265,9 +265,10 @@ inside genuine 1-1-1 ties. Unanimous and 2-of-3 majority columns are immutable;
 every response and protected span boundary is independently validated, and any
 bad span uses preserved deterministic consensus. Successful schema-2 bundles
 always include `transcript.txt`, `consensus.txt`, and `adjudication.json`.
-The earlier broader-span bake-off remains historical evidence; the isolated
-tie-only policy requires both calibration and held-out gates before a long-form
-alias can be recommended.
+The isolated tie-only evaluation found both candidates deterministic but no
+better than consensus, with repeatable fallback spans. No candidate passed both
+calibration and held-out gates, so no long-form alias is recommended. See the
+[`tie-only evidence`](benchmarks/published/2026-08-10-tie-only-adjudication/README.md).
 
 ## Benchmarking
 

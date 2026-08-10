@@ -144,9 +144,13 @@ Candidate-selection oracle ceilings are 27 and 40 errors respectively. Real
 model bake-off evidence and a recommended long-form alias are published only
 after both repeated-decision and accuracy gates pass.
 
-The earlier bounded-span result remains historical evidence. The tie-only
-experiment evaluates fresh prompts twice on both the original calibration
-snapshot and a disjoint held-out snapshot before making any recommendation.
+The tie-only experiment used fresh prompts twice on both the original
+calibration snapshot and a disjoint held-out snapshot. Both models were
+decision- and score-deterministic, but neither improved the 91-error calibration
+or 113-error held-out baseline, and both produced repeatable fallbacks. The
+recommendation is blocked, so the conditional long-form fixture was not run.
+See the
+[`tie-only evidence`](../benchmarks/published/2026-08-10-tie-only-adjudication/README.md).
 
 Continuous/provisional streaming adjudication, invented-text reconstruction,
 concurrent ASR scheduling, persistent ASR workers, and GPU scheduling remain
