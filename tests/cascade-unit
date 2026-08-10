@@ -17,6 +17,18 @@ def common(sequence, kind, position, **extra):
     }
 
 
+def endpoint(position, automatic=False, last_token=None, crossing=None, decoder=None):
+    return {
+        "schema_version": 1, "automatic_endpoint": automatic,
+        "decoder_clock_seconds": decoder,
+        "last_token_seconds": last_token,
+        "logical_threshold_crossing_seconds": crossing,
+        "raw_delivery_frontier_seconds": position,
+        "event_delivery_position_seconds": position,
+        "delivery_lag_seconds": position - crossing if automatic else None,
+    }
+
+
 validator = EventValidator("unit")
 validator.accept(common(
     1, "session_started", 0, models=[NEMOTRON_ALIAS, PARAKEET_ALIAS],
@@ -32,6 +44,7 @@ validator.accept(common(
     3, "transcript_update", 1.0, segment_id="segment-000001", track_id="nemotron",
     revision=2, state="segment_final", text="upstream",
     source_time={"start_seconds": 0.0, "end_seconds": 1.0}, model_alias=NEMOTRON_ALIAS,
+    endpoint_diagnostics=endpoint(1.0),
     words=[{"word": "upstream", "start_seconds": 0.1, "end_seconds": 0.8}],
 ))
 validator.accept(common(
@@ -39,6 +52,7 @@ validator.accept(common(
     revision=1, state="cascade_final", text="accurate",
     source_time={"start_seconds": 0.0, "end_seconds": 1.0}, model_alias=PARAKEET_ALIAS,
     selection="parakeet", supersedes={"track_id": "nemotron", "revision": 2},
+    endpoint_diagnostics=endpoint(1.0),
     words=[{"word": "accurate", "start_seconds": 0.2, "end_seconds": 0.9}],
 ))
 assert assemble_transcript(validator.segments) == "accurate"
@@ -75,6 +89,7 @@ fallback.accept(common(
     2, "transcript_update", 1, segment_id="segment-000001", track_id="nemotron",
     revision=1, state="segment_final", text="fallback",
     source_time={"start_seconds": 0.0, "end_seconds": 1.0}, model_alias=NEMOTRON_ALIAS,
+    endpoint_diagnostics=endpoint(1.0),
 ))
 fallback.accept(common(
     3, "session_warning", 1, code="pass_two_empty", message="empty",
@@ -84,6 +99,7 @@ fallback.accept(common(
     revision=1, state="cascade_final", text="fallback",
     source_time={"start_seconds": 0.0, "end_seconds": 1.0}, model_alias=NEMOTRON_ALIAS,
     selection="nemotron_fallback", supersedes={"track_id": "nemotron", "revision": 1},
+    endpoint_diagnostics=endpoint(1.0),
 ))
 assert fallback.segments[0]["authoritative"]["selection"] == "nemotron_fallback"
 
@@ -92,6 +108,7 @@ bad_time = {**common(
     5, "transcript_update", 2, segment_id="segment-000002", track_id="nemotron",
     revision=1, state="segment_final", text="second",
     source_time={"start_seconds": 1.0, "end_seconds": 2.0}, model_alias=NEMOTRON_ALIAS,
+    endpoint_diagnostics=endpoint(2.0),
     words=[{"word": "second", "start_seconds": 0.98, "end_seconds": 1.4}],
 )}
 fallback.accept(bad_time)
@@ -100,6 +117,7 @@ bad_authoritative = common(
     revision=1, state="cascade_final", text="accurate",
     source_time={"start_seconds": 1.0, "end_seconds": 2.0}, model_alias=PARAKEET_ALIAS,
     selection="parakeet", supersedes={"track_id": "nemotron", "revision": 1},
+    endpoint_diagnostics=endpoint(2.0),
     words=[{"word": "bad", "start_seconds": 0.1, "end_seconds": 0.2}],
 )
 try:
@@ -119,6 +137,28 @@ except ValueError as error:
     assert "monotonic" in str(error)
 else:
     raise AssertionError("backward Nemotron word order accepted")
+
+# A genuinely absent last-token clock remains nullable while the other
+# automatic-endpoint clocks retain their ordering contract.
+EventValidator._endpoint_diagnostics({
+    "audio_position_seconds": 1.3,
+    "endpoint_diagnostics": endpoint(
+        1.3, automatic=True, last_token=None, crossing=1.2, decoder=1.28,
+    ),
+}, 1.3)
+
+try:
+    EventValidator._endpoint_diagnostics({
+        "audio_position_seconds": 1.3,
+        "endpoint_diagnostics": {
+            **endpoint(1.3, automatic=True, crossing=1.2, decoder=1.28),
+            "delivery_lag_seconds": 0.4,
+        },
+    }, 1.3)
+except ValueError as error:
+    assert "delivery lag" in str(error)
+else:
+    raise AssertionError("inconsistent endpoint delivery lag accepted")
 
 # Schema 1 fixes the endpoint policy at 1,200 ms.
 old_policy = EventValidator("unit")

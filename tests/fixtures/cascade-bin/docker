@@ -64,13 +64,21 @@ if [[ $mode == silence ]]; then
   event 2 transcript_update 1.5 '{"segment_id":"segment-000001","track_id":"nemotron",
     "revision":1,"state":"segment_final","text":"",
     "source_time":{"start_seconds":0,"end_seconds":1.5},
-    "model_alias":"nemo:nemotron-streaming-en","words":[]}'
+    "model_alias":"nemo:nemotron-streaming-en","words":[],
+    "endpoint_diagnostics":{"schema_version":1,"automatic_endpoint":false,
+    "decoder_clock_seconds":null,"last_token_seconds":null,
+    "logical_threshold_crossing_seconds":null,"raw_delivery_frontier_seconds":1.5,
+    "event_delivery_position_seconds":1.5,"delivery_lag_seconds":null}}'
   event 3 session_warning 1.5 '{"code":"pass_two_empty","message":"both passes empty",
     "segment_id":"segment-000001","model_alias":"nemo:parakeet-tdt-v3"}'
   event 4 transcript_update 1.5 '{"segment_id":"segment-000001","track_id":"authoritative",
     "revision":1,"state":"cascade_final","text":"",
     "source_time":{"start_seconds":0,"end_seconds":1.5},"model_alias":null,
-    "selection":"silence","supersedes":{"track_id":"nemotron","revision":1},"words":[]}'
+    "selection":"silence","supersedes":{"track_id":"nemotron","revision":1},"words":[],
+    "endpoint_diagnostics":{"schema_version":1,"automatic_endpoint":false,
+    "decoder_clock_seconds":null,"last_token_seconds":null,
+    "logical_threshold_crossing_seconds":null,"raw_delivery_frontier_seconds":1.5,
+    "event_delivery_position_seconds":1.5,"delivery_lag_seconds":null}}'
   event 5 session_metrics 1.5 '{"model_load_counts":{"nemo:nemotron-streaming-en":1,
     "nemo:parakeet-tdt-v3":1},"timing":{"inference_seconds":0.4,"pass_two_seconds":0.1},
     "counts":{"segments":1,"provisional_updates":0,"parakeet_segments":0,
@@ -88,6 +96,10 @@ event 3 transcript_update 1.5 '{"segment_id":"segment-000001","track_id":"nemotr
   "revision":2,"state":"segment_final","text":"first upstream",
   "source_time":{"start_seconds":0,"end_seconds":1.5},
   "model_alias":"nemo:nemotron-streaming-en",
+  "endpoint_diagnostics":{"schema_version":1,"automatic_endpoint":true,
+  "decoder_clock_seconds":1.4,"last_token_seconds":0.2,
+  "logical_threshold_crossing_seconds":1.4,"raw_delivery_frontier_seconds":1.5,
+  "event_delivery_position_seconds":1.5,"delivery_lag_seconds":0.1},
   "words":[{"word":"first","start_seconds":0.1,"end_seconds":0.5}]}'
 
 if [[ $mode == fallback || $mode == error ]]; then
@@ -106,6 +118,10 @@ if [[ $mode == fallback || $mode == error ]]; then
     "source_time":{"start_seconds":0,"end_seconds":1.5},
     "model_alias":"nemo:nemotron-streaming-en","selection":"nemotron_fallback",
     "supersedes":{"track_id":"nemotron","revision":2},
+    "endpoint_diagnostics":{"schema_version":1,"automatic_endpoint":true,
+    "decoder_clock_seconds":1.4,"last_token_seconds":0.2,
+    "logical_threshold_crossing_seconds":1.4,"raw_delivery_frontier_seconds":1.5,
+    "event_delivery_position_seconds":1.5,"delivery_lag_seconds":0.1},
     "words":[{"word":"first","start_seconds":0.1,"end_seconds":0.5}]}'
   event 6 session_metrics 1.5 '{"model_load_counts":{"nemo:nemotron-streaming-en":1,
     "nemo:parakeet-tdt-v3":1},"timing":{"inference_seconds":0.4,"pass_two_seconds":0.1},
@@ -121,6 +137,10 @@ event 4 transcript_update 1.5 '{"segment_id":"segment-000001","track_id":"author
   "source_time":{"start_seconds":0,"end_seconds":1.5},
   "model_alias":"nemo:parakeet-tdt-v3","selection":"parakeet",
   "supersedes":{"track_id":"nemotron","revision":2},
+  "endpoint_diagnostics":{"schema_version":1,"automatic_endpoint":true,
+  "decoder_clock_seconds":1.4,"last_token_seconds":0.2,
+  "logical_threshold_crossing_seconds":1.4,"raw_delivery_frontier_seconds":1.5,
+  "event_delivery_position_seconds":1.5,"delivery_lag_seconds":0.1},
   "words":[{"word":"first","start_seconds":0.2,"end_seconds":0.6}]}'
 event 5 transcript_update 2.2 '{"segment_id":"segment-000002","track_id":"nemotron",
   "revision":1,"state":"provisional","text":"second draft",
@@ -130,12 +150,20 @@ event 6 transcript_update 3.5 '{"segment_id":"segment-000002","track_id":"nemotr
   "revision":2,"state":"segment_final","text":"second upstream",
   "source_time":{"start_seconds":1.5,"end_seconds":3.5},
   "model_alias":"nemo:nemotron-streaming-en",
+  "endpoint_diagnostics":{"schema_version":1,"automatic_endpoint":false,
+  "decoder_clock_seconds":null,"last_token_seconds":null,
+  "logical_threshold_crossing_seconds":null,"raw_delivery_frontier_seconds":3.5,
+  "event_delivery_position_seconds":3.5,"delivery_lag_seconds":null},
   "words":[{"word":"second","start_seconds":1.7,"end_seconds":2.2}]}'
 event 7 transcript_update 3.5 '{"segment_id":"segment-000002","track_id":"authoritative",
   "revision":1,"state":"cascade_final","text":"second accurate",
   "source_time":{"start_seconds":1.5,"end_seconds":3.5},
   "model_alias":"nemo:parakeet-tdt-v3","selection":"parakeet",
   "supersedes":{"track_id":"nemotron","revision":2},
+  "endpoint_diagnostics":{"schema_version":1,"automatic_endpoint":false,
+  "decoder_clock_seconds":null,"last_token_seconds":null,
+  "logical_threshold_crossing_seconds":null,"raw_delivery_frontier_seconds":3.5,
+  "event_delivery_position_seconds":3.5,"delivery_lag_seconds":null},
   "words":[{"word":"second","start_seconds":1.7,"end_seconds":2.2}]}'
 event 8 session_metrics 3.5 '{"model_load_counts":{"nemo:nemotron-streaming-en":1,
   "nemo:parakeet-tdt-v3":1},"timing":{"inference_seconds":0.8,"pass_two_seconds":0.2},

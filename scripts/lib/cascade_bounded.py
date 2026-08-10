@@ -31,7 +31,7 @@ from evaluation import NORMALIZATION_VERSION, errors, normalize
 
 
 SCHEMA_VERSION = 1
-RECIPE_VERSION = "cascade-bounded-pcm16-pairs-v1"
+RECIPE_VERSION = "cascade-bounded-pcm16-pairs-v2"
 SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
@@ -368,6 +368,7 @@ def adapter_digest(root: Path) -> str:
         "scripts/benchmark-cascade-bounded", "scripts/lib/cascade_bounded.py",
         "scripts/cascade", "scripts/lib/cascade.py", "scripts/lib/evaluation.py",
         "docker/nemo-speech/native-asr-cascade.cpp", "docker/nemo-speech/Dockerfile",
+        "docker/nemo-speech/endpoint-diagnostics.patch",
     ):
         digest.update(relative.encode() + b"\0")
         digest.update((root / relative).read_bytes() + b"\0")
@@ -379,6 +380,7 @@ def cascade_adapter_digest(root: Path) -> str:
         root / "scripts/cascade", root / "scripts/lib/cascade.py",
         root / "docker/nemo-speech/entrypoint.sh",
         root / "docker/nemo-speech/native-asr-cascade.cpp",
+        root / "docker/nemo-speech/endpoint-diagnostics.patch",
         root / "docker/nemo-speech/Dockerfile",
     ])
 
@@ -785,6 +787,63 @@ def pilot_endpoint_diagnostic(pair: dict[str, Any], detail: dict[str, Any],
     }
 
 
+def classify_gap_endpoint(pair: dict[str, Any], detail: dict[str, Any],
+                          tolerance: float = 0.05) -> dict[str, Any]:
+    """Classify the pair's inserted gap on the runtime's logical endpoint clock."""
+    gap = pair["boundaries"]["gap"]
+    expected = float(gap["start_seconds"]) + ENDPOINT_SILENCE_SECONDS
+    natural = [row for row in detail.get("endpoint_diagnostics", [])
+               if row.get("automatic_endpoint") is True and
+               row.get("logical_threshold_crossing_seconds") is not None]
+    if not natural:
+        return {
+            "classification": "no_natural_endpoint", "gap": gap,
+            "expected_threshold_crossing_seconds": expected,
+            "selected_endpoint_diagnostics": None, "natural_endpoint_count": 0,
+        }
+    selected = min(
+        natural,
+        key=lambda row: abs(float(row["logical_threshold_crossing_seconds"]) - expected),
+    )
+    logical = float(selected["logical_threshold_crossing_seconds"])
+    delivery = float(selected["event_delivery_position_seconds"])
+    if logical < float(gap["start_seconds"]) - tolerance:
+        classification = "logical_early"
+    elif logical > float(gap["end_seconds"]) + tolerance:
+        classification = "logical_late"
+    elif (float(gap["start_seconds"]) - tolerance <= delivery <=
+          float(gap["end_seconds"]) + tolerance):
+        classification = "logical_and_delivery_in_gap"
+    elif delivery > float(gap["end_seconds"]) + tolerance:
+        classification = "logical_in_gap_delivery_late"
+    else:
+        raise BenchmarkError("logical endpoint delivery preceded its inserted gap")
+    return {
+        "classification": classification, "gap": gap,
+        "expected_threshold_crossing_seconds": expected,
+        "selected_endpoint_diagnostics": selected,
+        "natural_endpoint_count": len(natural),
+    }
+
+
+def recommend_endpoint_repair(diagnostics: list[dict[str, Any]]) -> dict[str, str]:
+    missed = [row for row in diagnostics if not row["gap_endpointed"]]
+    if not missed:
+        return {
+            "repair": "none",
+            "reason": "every inserted gap received a naturally delivered endpoint",
+        }
+    if all(row["classification"] == "logical_in_gap_delivery_late" for row in missed):
+        return {
+            "repair": "boundary_timestamp_and_buffer_attribution",
+            "reason": "every missed endpoint crossed logically inside its inserted gap",
+        }
+    return {
+        "repair": "vad_driven_endpointing",
+        "reason": "at least one missed endpoint crossed outside its gap or never fired",
+    }
+
+
 def boundary_diagnostic(pair: dict[str, Any], hypothesis: str) -> dict[str, Any]:
     first = normalize(pair["members"][0]["reference"]).split()
     second = normalize(pair["members"][1]["reference"]).split()
@@ -922,6 +981,14 @@ class RealBackend:
             "counts": counts, "model_load_counts": loads,
             "segments": len(segments),
             "endpoints_seconds": [float(event["source_time"]["end_seconds"]) for event in finals],
+            "endpoint_diagnostics": [
+                {
+                    "segment_id": event["segment_id"],
+                    "source_time": event["source_time"],
+                    **event["endpoint_diagnostics"],
+                }
+                for event in finals
+            ],
             "provisional_updates": len(provisional),
             "partial_source_clock_lags_seconds": [
                 float(event["emitted_monotonic_seconds"]) - float(event["audio_position_seconds"])
@@ -1029,6 +1096,21 @@ class FakeBackend:
                 endpoints = [source["boundaries"]["first"]["end_seconds"] / 2,
                              *endpoints]
                 segments = 3
+        endpoint_diagnostics = []
+        for index, endpoint in enumerate(endpoints):
+            automatic = index < len(endpoints) - 1
+            crossing = endpoint - 0.1 if automatic else None
+            endpoint_diagnostics.append({
+                "segment_id": f"segment-{index + 1:06d}",
+                "source_time": {"start_seconds": 0.0, "end_seconds": endpoint},
+                "schema_version": 1, "automatic_endpoint": automatic,
+                "decoder_clock_seconds": endpoint - 0.05 if automatic else None,
+                "last_token_seconds": crossing - ENDPOINT_SILENCE_SECONDS if automatic else None,
+                "logical_threshold_crossing_seconds": crossing,
+                "raw_delivery_frontier_seconds": endpoint,
+                "event_delivery_position_seconds": endpoint,
+                "delivery_lag_seconds": endpoint - crossing if automatic else None,
+            })
         loads = {NEMOTRON_ALIAS: 1, PARAKEET_ALIAS: 1}
         if self.scenario == "load-count" and self.calls == 1: loads[PARAKEET_ALIAS] = 2
         counts = {"segments": segments, "provisional_updates": segments,
@@ -1043,6 +1125,7 @@ class FakeBackend:
                                       "peak_rss_kb": 1000}, "native": {"inference_seconds": 0.05}},
             "peak_rss_kb": 1000, "counts": counts, "model_load_counts": loads,
             "segments": segments, "endpoints_seconds": endpoints,
+            "endpoint_diagnostics": endpoint_diagnostics,
             "provisional_updates": segments, "partial_source_clock_lags_seconds": [0.25] * segments,
             "correction_latencies_seconds": [0.1] * segments, "provenance": self.prov,
             "artifact": "fake", "failure": None,
@@ -1190,6 +1273,10 @@ def parser() -> argparse.ArgumentParser:
                         help=argparse.SUPPRESS)
     result.add_argument("--reuse-baselines-from", type=Path, metavar="RUN_DIR",
                         help="reuse individually verified Parakeet/Nemotron baseline details")
+    result.add_argument(
+        "--endpoint-diagnostics-only", action="store_true",
+        help="run only the fixed ten-pair endpoint-clock diagnostic pilot",
+    )
     return result
 
 
@@ -1200,6 +1287,10 @@ def main(argv: list[str] | None = None) -> int:
         parser().error("--limit-per-split must be a positive even integer no greater than 100")
     if args.pilot_pairs_per_split <= 0 or args.pilot_pairs_per_split > args.limit_per_split // 2:
         parser().error("--pilot-pairs-per-split must fit within the selected pairs")
+    if args.endpoint_diagnostics_only and args.pilot_pairs_per_split != 5:
+        parser().error("--endpoint-diagnostics-only requires exactly five pilot pairs per split")
+    if args.endpoint_diagnostics_only and args.reuse_baselines_from is not None:
+        parser().error("--endpoint-diagnostics-only does not run or reuse baselines")
     if min(args.pair_timeout_seconds, args.paced_timeout_seconds,
            args.overall_deadline_seconds, args.stream_max_seconds) <= 0:
         parser().error("timeouts and duration caps must be positive")
@@ -1238,6 +1329,7 @@ def main(argv: list[str] | None = None) -> int:
             "gap_seconds": GAP_SECONDS, "gap_frames": GAP_FRAMES,
             "endpointing": ENDPOINT_POLICY,
             "pilot_pairs_per_split": args.pilot_pairs_per_split,
+            "endpoint_diagnostics_only": args.endpoint_diagnostics_only,
             "pair_timeout_seconds": args.pair_timeout_seconds,
             "paced_timeout_seconds": args.paced_timeout_seconds,
             "overall_deadline_seconds": args.overall_deadline_seconds,
@@ -1273,7 +1365,10 @@ def main(argv: list[str] | None = None) -> int:
         if reuse is not None:
             reuse.attach(run_root)
         final_path = run_root / "verdict.json"
-        if final_path.is_file() and read_json(final_path).get("phase") == "complete":
+        if final_path.is_file() and (
+                read_json(final_path).get("phase") == "complete" or
+                (read_json(final_path).get("phase") == "endpoint_diagnostics" and
+                 read_json(final_path).get("diagnostic_collection_success") is True)):
             verdict = read_json(final_path)
             print(f"resume: bounded run already complete: {run_root}")
             return 0 if verdict.get("pass") else 1
@@ -1361,6 +1456,97 @@ def main(argv: list[str] | None = None) -> int:
         allowed_extra_endpoint_pairs = math.floor(
             len(pilot) * PILOT_MAX_EXTRA_ENDPOINT_PAIR_RATE
         )
+        if args.endpoint_diagnostics_only:
+            for pair in pilot:
+                row = execute_mode(pair, "cascade")
+                pilot_ok = row.get("status") == "complete" and row.get("model_load_counts") == {
+                    NEMOTRON_ALIAS: 1, PARAKEET_ALIAS: 1}
+                if not pilot_ok:
+                    diagnostic_verdict = {
+                        "schema_version": SCHEMA_VERSION,
+                        "run_fingerprint": run_fingerprint,
+                        "phase": "endpoint_diagnostics",
+                        "pass": False,
+                        "diagnostic_collection_success": False,
+                        "endpoint_contract_success": None,
+                        "stopped_at_pair": pair["pair_id"],
+                        "failure": row.get("failure") or {
+                            "kind": "contract", "message": "incorrect model load count"},
+                        "endpoint_diagnostics": pilot_diagnostics,
+                        "completed_at": utc_now(), "results_root": str(run_root),
+                    }
+                    atomic_json(run_root / "endpoint_diagnostics.json", diagnostic_verdict)
+                    atomic_json(run_root / "pilot_verdict.json", diagnostic_verdict)
+                    atomic_json(final_path, diagnostic_verdict)
+                    state["phase"] = "endpoint_diagnostics_failed"; checkpoint()
+                    print(
+                        f"FAIL: endpoint diagnostic stopped at {pair['pair_id']}; evidence: {run_root}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                delivery = pilot_endpoint_diagnostic(pair, row)
+                clock = classify_gap_endpoint(pair, row)
+                diagnostic = {
+                    "pair_id": pair["pair_id"], "split": pair["split"],
+                    **delivery, **clock,
+                    "segment_diagnostics": row["endpoint_diagnostics"],
+                }
+                pilot_diagnostics.append(diagnostic)
+                if diagnostic["extra_endpoints_seconds"]:
+                    extra_endpoint_pairs += 1
+
+            hits = sum(row["gap_endpointed"] for row in pilot_diagnostics)
+            lags = [
+                float(segment["delivery_lag_seconds"])
+                for row in pilot_diagnostics for segment in row["segment_diagnostics"]
+                if segment.get("automatic_endpoint") is True and
+                segment.get("delivery_lag_seconds") is not None
+            ]
+            endpoint_contract_success = (
+                hits == len(pilot) and extra_endpoint_pairs <= allowed_extra_endpoint_pairs
+            )
+            diagnostic_verdict = {
+                "schema_version": SCHEMA_VERSION,
+                "run_fingerprint": run_fingerprint,
+                "phase": "endpoint_diagnostics",
+                "pass": endpoint_contract_success,
+                "diagnostic_collection_success": True,
+                "endpoint_contract_success": endpoint_contract_success,
+                "pairs": len(pilot),
+                "inserted_gap_endpoint_recall": hits / len(pilot) if pilot else None,
+                "classifications": {
+                    category: sum(row["classification"] == category for row in pilot_diagnostics)
+                    for category in (
+                        "logical_and_delivery_in_gap", "logical_in_gap_delivery_late",
+                        "logical_early", "logical_late", "no_natural_endpoint",
+                    )
+                },
+                "delivery_lag_seconds": {
+                    "count": len(lags), "minimum": min(lags) if lags else None,
+                    "p50": percentile(lags, 0.50), "p95": percentile(lags, 0.95),
+                    "maximum": max(lags) if lags else None,
+                },
+                "extra_endpoint_pairs": extra_endpoint_pairs,
+                "allowed_extra_endpoint_pairs": allowed_extra_endpoint_pairs,
+                "endpoint_diagnostics": pilot_diagnostics,
+                "recommended_next_repair": recommend_endpoint_repair(pilot_diagnostics),
+                "completed_at": utc_now(), "results_root": str(run_root),
+            }
+            if not endpoint_contract_success:
+                diagnostic_verdict["failure"] = {
+                    "kind": "endpoint_contract",
+                    "message": "the fixed ten-pair endpoint contract still fails",
+                }
+            atomic_json(run_root / "endpoint_diagnostics.json", diagnostic_verdict)
+            atomic_json(run_root / "pilot_verdict.json", diagnostic_verdict)
+            atomic_json(final_path, diagnostic_verdict)
+            state["phase"] = "endpoint_diagnostics_complete"; checkpoint()
+            print(
+                ("PASS" if endpoint_contract_success else "FAIL") +
+                f": endpoint-clock diagnostic; evidence: {run_root}"
+            )
+            return 0 if endpoint_contract_success else 1
+
         for pair in pilot:
             row = execute_mode(pair, "cascade")
             pilot_ok = row.get("status") == "complete" and row.get("model_load_counts") == {

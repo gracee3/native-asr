@@ -22,6 +22,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
+COPY docker/nemo-speech/endpoint-diagnostics.patch /tmp/endpoint-diagnostics.patch
 RUN git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/NeMo-Speech.cpp.git \
         nemo-speech \
     && cd nemo-speech \
@@ -30,7 +31,9 @@ RUN git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/NeMo-Sp
     && grep -Fqx "NEMO_SPEECH_VERSION: ${NEMO_SPEECH_VERSION}" VERSION \
     && test "$(git rev-parse HEAD:ggml)" = "${GGML_REVISION}" \
     && git submodule update --init --depth 1 ggml \
-    && test "$(git -C ggml rev-parse HEAD)" = "${GGML_REVISION}"
+    && test "$(git -C ggml rev-parse HEAD)" = "${GGML_REVISION}" \
+    && git apply --check /tmp/endpoint-diagnostics.patch \
+    && git apply /tmp/endpoint-diagnostics.patch
 
 WORKDIR /src/nemo-speech
 COPY docker/nemo-speech/native-asr-cascade.cpp /tmp/native-asr-cascade.cpp

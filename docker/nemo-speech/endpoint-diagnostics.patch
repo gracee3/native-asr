@@ -1,0 +1,190 @@
+diff --git a/include/nemo_speech/asr.h b/include/nemo_speech/asr.h
+index 03d5548..5f00ecb 100644
+--- a/include/nemo_speech/asr.h
++++ b/include/nemo_speech/asr.h
+@@ -251,6 +251,17 @@ NEMO_SPEECH_ASR_API void nemo_speech_asr_stream_close(nemo_speech_asr_stream* st
+ NEMO_SPEECH_ASR_API bool nemo_speech_asr_result_is_final(const nemo_speech_asr_result* result);
+ NEMO_SPEECH_ASR_API float nemo_speech_asr_result_audio_processed(
+     const nemo_speech_asr_result* result);
++// True only when a configured automatic endpoint threshold produced this
++// result. Forced and end-of-stream finals return false. Optional clock
++// accessors return NAN when the value does not exist.
++NEMO_SPEECH_ASR_API bool
++nemo_speech_asr_result_endpoint_triggered(const nemo_speech_asr_result* result);
++NEMO_SPEECH_ASR_API float
++nemo_speech_asr_result_endpoint_decode_clock(const nemo_speech_asr_result* result);
++NEMO_SPEECH_ASR_API float
++nemo_speech_asr_result_endpoint_last_token(const nemo_speech_asr_result* result);
++NEMO_SPEECH_ASR_API float
++nemo_speech_asr_result_endpoint_threshold_crossing(const nemo_speech_asr_result* result);
+ // 1-based input channel this result belongs to (proto channel_tag). Mono input
+ // is always 1; multi-channel recognition is not implemented, so this is 1 today.
+ NEMO_SPEECH_ASR_API int32_t
+diff --git a/src/asr/c_api.cpp b/src/asr/c_api.cpp
+index 1ea3997..92c94f8 100644
+--- a/src/asr/c_api.cpp
++++ b/src/asr/c_api.cpp
+@@ -6,6 +6,7 @@
+ #include <cstring>
+ #include <memory>
+ #include <new>
++#include <limits>
+ #include <optional>
+ #include <stdexcept>
+ #include <string>
+@@ -410,6 +411,28 @@ float
+ nemo_speech_asr_result_audio_processed(const nemo_speech_asr_result* result) {
+     return result ? result->value.audio_processed : 0.0f;
+ }
++bool
++nemo_speech_asr_result_endpoint_triggered(const nemo_speech_asr_result* result) {
++    return result ? result->value.endpoint_triggered : false;
++}
++float
++nemo_speech_asr_result_endpoint_decode_clock(const nemo_speech_asr_result* result) {
++    return result && result->value.endpoint_decode_clock
++               ? *result->value.endpoint_decode_clock
++               : std::numeric_limits<float>::quiet_NaN();
++}
++float
++nemo_speech_asr_result_endpoint_last_token(const nemo_speech_asr_result* result) {
++    return result && result->value.endpoint_last_token
++               ? *result->value.endpoint_last_token
++               : std::numeric_limits<float>::quiet_NaN();
++}
++float
++nemo_speech_asr_result_endpoint_threshold_crossing(const nemo_speech_asr_result* result) {
++    return result && result->value.endpoint_threshold_crossing
++               ? *result->value.endpoint_threshold_crossing
++               : std::numeric_limits<float>::quiet_NaN();
++}
+ int32_t
+ nemo_speech_asr_result_channel_tag(const nemo_speech_asr_result* result) {
+     return result ? result->value.channel_tag : 0;
+diff --git a/src/asr/recognizer.cpp b/src/asr/recognizer.cpp
+index 3699234..7b50cfd 100644
+--- a/src/asr/recognizer.cpp
++++ b/src/asr/recognizer.cpp
+@@ -314,6 +314,10 @@ RecognitionStream::build_result_(const StreamingUpdate& u, bool is_final) const
+     r.stability = is_final ? 1.0f : 0.0f;
+     r.channel_tag = 1;
+     r.audio_processed = u.audio_processed_sec;
++    r.endpoint_triggered = u.endpoint_triggered;
++    r.endpoint_decode_clock = u.endpoint_decode_clock_sec;
++    r.endpoint_last_token = u.endpoint_last_token_sec;
++    r.endpoint_threshold_crossing = u.endpoint_threshold_crossing_sec;
+ 
+     if (!is_final) {
+         // Interim results contain only the raw top hypothesis.
+diff --git a/src/asr/runner.cpp b/src/asr/runner.cpp
+index 477585c..420db6e 100644
+--- a/src/asr/runner.cpp
++++ b/src/asr/runner.cpp
+@@ -226,8 +226,10 @@ BufferedStreamRunner::set_request_options(const AsrRequestOptions& opts) {
+ 
+ void
+ BufferedStreamRunner::force_eou() {
+-    if (endpointer_)
++    if (endpointer_) {
++        force_eou_pending_ = true;
+         endpointer_->force();
++    }
+ }
+ 
+ void
+@@ -332,6 +334,15 @@ BufferedStreamRunner::poll_endpoint(StreamingUpdate& update) {
+     }
+     if (!endpointer_->poll(now_ms, last_speech_ms))
+         return false;
++    const bool automatic = !force_eou_pending_;
++    force_eou_pending_ = false;
++    update.endpoint_triggered = automatic;
++    update.endpoint_decode_clock_sec = static_cast<float>(now_ms / 1000.0);
++    if (!endpointer_->config().vad_based && head_ && head_->last_emit_frame() >= 0)
++        update.endpoint_last_token_sec = static_cast<float>(last_speech_ms / 1000.0);
++    if (automatic)
++        update.endpoint_threshold_crossing_sec =
++            static_cast<float>((last_speech_ms + endpointer_->stop_history_eou_ms()) / 1000.0);
+     // Keep the masker FSM + cursors: the stream continues into the next
+     // utterance.
+     fire_eou(head_.get(), opts_, all_tokens_, transcript_, update);
+@@ -464,6 +475,7 @@ BufferedStreamRunner::reset() {
+     audio_fed_to_vad_ = 0;
+     if (endpointer_)
+         endpointer_->reset();
++    force_eou_pending_ = false;
+     vad_scan_frame_ = 0;
+     vad_speech_seen_frame_ = -1;
+ }
+@@ -1132,7 +1144,15 @@ CacheStreamRunner::poll_endpoint(StreamingUpdate& update, bool after_chunk) {
+     if (!endpointer_->poll(now_ms, last_speech_ms))
+         return false;
+     const bool preserve_buffered_future = after_chunk && !force_eou_pending_;
++    const bool automatic = !force_eou_pending_;
+     force_eou_pending_ = false;
++    update.endpoint_triggered = automatic;
++    update.endpoint_decode_clock_sec = static_cast<float>(now_ms / 1000.0);
++    if (!endpointer_->config().vad_based && head_ && head_->last_emit_frame() >= 0)
++        update.endpoint_last_token_sec = static_cast<float>(last_speech_ms / 1000.0);
++    if (automatic)
++        update.endpoint_threshold_crossing_sec =
++            static_cast<float>((last_speech_ms + endpointer_->stop_history_eou_ms()) / 1000.0);
+     finish_endpoint(update, preserve_buffered_future);
+     return true;
+ }
+diff --git a/src/asr/runner.h b/src/asr/runner.h
+index 05b206f..5586ce6 100644
+--- a/src/asr/runner.h
++++ b/src/asr/runner.h
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <memory>
++#include <optional>
+ #include <string>
+ #include <vector>
+ 
+@@ -63,6 +64,12 @@ struct StreamingUpdate {
+     float confidence = 1.0f;
+     // Seconds of audio processed.
+     float audio_processed_sec = 0.0f;
++    // Automatic endpoint diagnostics. Optional clocks remain empty for EOF
++    // finals and for values that do not exist (for example, no decoder token).
++    bool endpoint_triggered = false;
++    std::optional<float> endpoint_decode_clock_sec;
++    std::optional<float> endpoint_last_token_sec;
++    std::optional<float> endpoint_threshold_crossing_sec;
+ };
+ 
+ // Runner methods are single-threaded. Independent runners may execute
+@@ -176,6 +183,7 @@ class BufferedStreamRunner final : public AsrRunner {
+ 
+     // Always constructed so force_eou() works when threshold endpointing is off.
+     std::unique_ptr<VadEndpointer> endpointer_;
++    bool force_eou_pending_ = false;
+     // VAD-driven EOU scan state: next global mel frame to scan, and the last
+     // speech mel frame seen at or before the decode cursor.
+     int64_t vad_scan_frame_ = 0;
+diff --git a/src/asr/types.h b/src/asr/types.h
+index 25ea542..7982352 100644
+--- a/src/asr/types.h
++++ b/src/asr/types.h
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <cstdint>
++#include <optional>
+ #include <string>
+ #include <vector>
+ 
+@@ -66,6 +67,10 @@ struct Result {  // proto: Streaming/SpeechRecognitionResult
+     float stability = 0.0f;
+     int32_t channel_tag = 1;       // mono channel
+     float audio_processed = 0.0f;  // seconds (proto audio_processed)
++    bool endpoint_triggered = false;
++    std::optional<float> endpoint_decode_clock;
++    std::optional<float> endpoint_last_token;
++    std::optional<float> endpoint_threshold_crossing;
+ };
+ 
+ }  // namespace nemo_speech::asr

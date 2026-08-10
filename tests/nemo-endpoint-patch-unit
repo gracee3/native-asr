@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$repo_root" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+patch = (root / "docker/nemo-speech/endpoint-diagnostics.patch").read_text()
+wrapper = (root / "docker/nemo-speech/native-asr-cascade.cpp").read_text()
+dockerfile = (root / "docker/nemo-speech/Dockerfile").read_text()
+bounded = (root / "scripts/lib/cascade_bounded.py").read_text()
+
+for accessor in (
+    "nemo_speech_asr_result_endpoint_triggered",
+    "nemo_speech_asr_result_endpoint_decode_clock",
+    "nemo_speech_asr_result_endpoint_last_token",
+    "nemo_speech_asr_result_endpoint_threshold_crossing",
+):
+    assert f"+{accessor}" in patch
+    assert accessor in wrapper
+
+# The patch must propagate every clock across both internal value types before
+# exposing it, and represent a genuinely absent token clock as NaN at the C ABI.
+for assignment in (
+    "r.endpoint_triggered = u.endpoint_triggered",
+    "r.endpoint_decode_clock = u.endpoint_decode_clock_sec",
+    "r.endpoint_last_token = u.endpoint_last_token_sec",
+    "r.endpoint_threshold_crossing = u.endpoint_threshold_crossing_sec",
+):
+    assert f"+    {assignment};" in patch
+assert "+    std::optional<float> endpoint_last_token_sec;" in patch
+assert "+    std::optional<float> endpoint_last_token;" in patch
+assert "quiet_NaN()" in patch
+assert "git apply --check /tmp/endpoint-diagnostics.patch" in dockerfile
+assert bounded.count('"docker/nemo-speech/endpoint-diagnostics.patch"') >= 1
+print("NeMo endpoint diagnostic patch contract tests: ok")
+PY

@@ -11,8 +11,8 @@ import wave
 from cascade_bounded import (
     GAP_FRAMES, NEMOTRON_ALIAS, PARAKEET_ALIAS, aggregate_pairs,
     atomic_json, boundary_diagnostic, deterministic_pairs, endpoint_attribution,
-    fingerprint, ModeTimeout, pilot_endpoint_diagnostic, ranked, run_process,
-    wer_record, write_pair_wav,
+    classify_gap_endpoint, fingerprint, ModeTimeout, pilot_endpoint_diagnostic,
+    ranked, recommend_endpoint_repair, run_process, wer_record, write_pair_wav,
 )
 
 
@@ -71,6 +71,36 @@ diagnostic = pilot_endpoint_diagnostic(
 )
 assert diagnostic["gap_endpointed"] and diagnostic["eof_endpointed"]
 assert diagnostic["extra_endpoints_seconds"] == [2.0]
+
+def clock_detail(logical=None, delivery=None):
+    rows = [] if logical is None else [{
+        "automatic_endpoint": True,
+        "logical_threshold_crossing_seconds": logical,
+        "event_delivery_position_seconds": delivery,
+        "delivery_lag_seconds": delivery - logical,
+    }]
+    return {"endpoint_diagnostics": rows}
+
+
+expected_classes = (
+    (4.2, 4.3, "logical_and_delivery_in_gap"),
+    (4.2, 4.8, "logical_in_gap_delivery_late"),
+    (2.8, 2.9, "logical_early"),
+    (4.8, 4.9, "logical_late"),
+    (None, None, "no_natural_endpoint"),
+)
+for logical, delivery, expected in expected_classes:
+    observed = classify_gap_endpoint(pilot_pair, clock_detail(logical, delivery))
+    assert observed["classification"] == expected
+
+repair = recommend_endpoint_repair([{
+    "gap_endpointed": False, "classification": "logical_in_gap_delivery_late",
+}])
+assert repair["repair"] == "boundary_timestamp_and_buffer_attribution"
+repair = recommend_endpoint_repair([{
+    "gap_endpointed": False, "classification": "logical_late",
+}])
+assert repair["repair"] == "vad_driven_endpointing"
 
 source_pairs = []
 details = {}

@@ -192,6 +192,48 @@ class EventValidator:
                 raise ValueError("word timestamps are not monotonic")
             prior = word_start
 
+    @staticmethod
+    def _endpoint_diagnostics(event: dict[str, Any], end: float) -> dict[str, Any]:
+        diagnostic = event.get("endpoint_diagnostics")
+        if not isinstance(diagnostic, dict) or diagnostic.get("schema_version") != 1:
+            raise ValueError("final transcript has no schema-1 endpoint diagnostics")
+        automatic = diagnostic.get("automatic_endpoint")
+        if not isinstance(automatic, bool):
+            raise ValueError("endpoint automatic flag is malformed")
+
+        def optional_clock(name: str) -> float | None:
+            value = diagnostic.get(name)
+            if value is None:
+                return None
+            clock = _finite_number(value, f"endpoint {name}")
+            if clock < 0:
+                raise ValueError("endpoint clocks must be nonnegative")
+            return clock
+
+        decode = optional_clock("decoder_clock_seconds")
+        last_token = optional_clock("last_token_seconds")
+        crossing = optional_clock("logical_threshold_crossing_seconds")
+        raw = optional_clock("raw_delivery_frontier_seconds")
+        delivery = optional_clock("event_delivery_position_seconds")
+        lag = optional_clock("delivery_lag_seconds")
+        if raw is None or delivery is None:
+            raise ValueError("endpoint delivery clocks must be present")
+        if abs(delivery - end) > 0.002 or abs(delivery - event["audio_position_seconds"]) > 0.002:
+            raise ValueError("endpoint event delivery position changed")
+        if automatic:
+            if decode is None or crossing is None or lag is None:
+                raise ValueError("automatic endpoint clocks are incomplete")
+            if crossing > decode + 0.002 or decode > raw + 0.002:
+                raise ValueError("automatic endpoint clocks are out of order")
+            if abs(lag - (delivery - crossing)) > 0.002:
+                raise ValueError("endpoint delivery lag is inconsistent")
+            if last_token is not None and abs(
+                    crossing - last_token - ENDPOINT_SILENCE_MILLISECONDS / 1_000) > 0.002:
+                raise ValueError("endpoint threshold crossing is inconsistent")
+        elif any(value is not None for value in (decode, last_token, crossing, lag)):
+            raise ValueError("EOF endpoint diagnostics unexpectedly carry decoder clocks")
+        return diagnostic
+
     def _common(self, event: dict[str, Any]) -> None:
         if event.get("schema_version") != 1:
             raise ValueError("unsupported cascade event schema")
@@ -244,6 +286,7 @@ class EventValidator:
                 "nemotron_updates": [],
                 "nemotron_final": None,
                 "authoritative": None,
+                "endpoint_diagnostics": None,
             }
         elif self.current["segment_id"] != segment_id:
             raise ValueError("new segment began before the prior cascade final")
@@ -258,6 +301,8 @@ class EventValidator:
             if event.get("model_alias") != NEMOTRON_ALIAS:
                 raise ValueError("Nemotron update has the wrong model alias")
             if state == "provisional":
+                if "endpoint_diagnostics" in event:
+                    raise ValueError("provisional update carries endpoint diagnostics")
                 if not event["text"].strip():
                     raise ValueError("empty provisional update")
                 previous = next(
@@ -270,6 +315,9 @@ class EventValidator:
                 # tail beyond the exact endpoint. Preserve those absolute
                 # native values rather than clipping them to the source slice.
                 self._words(event, start, end, enforce_segment_bounds=False)
+                self.current["endpoint_diagnostics"] = self._endpoint_diagnostics(
+                    event, end
+                )
                 self.current["nemotron_final"] = event
                 self.current["source_time"] = {"start_seconds": start, "end_seconds": end}
             updates.append(event)
@@ -281,6 +329,9 @@ class EventValidator:
                 raise ValueError("cascade final does not follow one Nemotron final")
             if source != nemotron["source_time"]:
                 raise ValueError("cascade final changed the endpointed source range")
+            endpoint_diagnostics = self._endpoint_diagnostics(event, end)
+            if endpoint_diagnostics != self.current["endpoint_diagnostics"]:
+                raise ValueError("cascade final changed endpoint diagnostics")
             supersedes = event.get("supersedes")
             if supersedes != {"track_id": "nemotron", "revision": nemotron["revision"]}:
                 raise ValueError("cascade final has the wrong superseded revision")
@@ -491,6 +542,7 @@ class CascadeJob:
             self.root / "scripts/cascade", self.root / "scripts/lib/cascade.py",
             self.root / "docker/nemo-speech/entrypoint.sh",
             self.root / "docker/nemo-speech/native-asr-cascade.cpp",
+            self.root / "docker/nemo-speech/endpoint-diagnostics.patch",
             self.root / "docker/nemo-speech/Dockerfile",
         ])
 

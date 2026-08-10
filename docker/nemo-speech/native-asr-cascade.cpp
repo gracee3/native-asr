@@ -189,6 +189,36 @@ std::string words_json(const nemo_speech_asr_result* result, double offset_secon
     return output;
 }
 
+std::string nullable_seconds(float value) {
+    if (!std::isfinite(value)) return "null";
+    char output[64];
+    std::snprintf(output, sizeof(output), "%.6f", static_cast<double>(value));
+    return output;
+}
+
+std::string endpoint_diagnostics_json(
+    const nemo_speech_asr_result* result, double event_delivery_position) {
+    const bool automatic = nemo_speech_asr_result_endpoint_triggered(result);
+    const float decode_clock = nemo_speech_asr_result_endpoint_decode_clock(result);
+    const float last_token = nemo_speech_asr_result_endpoint_last_token(result);
+    const float logical_crossing = nemo_speech_asr_result_endpoint_threshold_crossing(result);
+    const float raw_frontier = nemo_speech_asr_result_audio_processed(result);
+    const double delivery_lag =
+        automatic && std::isfinite(logical_crossing)
+            ? event_delivery_position - static_cast<double>(logical_crossing)
+            : NAN;
+    return
+        "\"endpoint_diagnostics\":{\"schema_version\":1,\"automatic_endpoint\":" +
+        std::string(automatic ? "true" : "false") +
+        ",\"decoder_clock_seconds\":" + nullable_seconds(decode_clock) +
+        ",\"last_token_seconds\":" + nullable_seconds(last_token) +
+        ",\"logical_threshold_crossing_seconds\":" + nullable_seconds(logical_crossing) +
+        ",\"raw_delivery_frontier_seconds\":" + nullable_seconds(raw_frontier) +
+        ",\"event_delivery_position_seconds\":" +
+        nullable_seconds(static_cast<float>(event_delivery_position)) +
+        ",\"delivery_lag_seconds\":" + nullable_seconds(static_cast<float>(delivery_lag)) + "}";
+}
+
 bool create_recognizer(
     const std::string& path, bool endpointing, Recognizer& recognizer, std::string& error) {
     nemo_speech_asr_backend_config backend = {};
@@ -290,10 +320,12 @@ struct Cascade {
         const double end = static_cast<double>(boundary) / kSampleRate;
         const char* raw_nemotron = nemo_speech_asr_result_transcript(nemotron_result, 0);
         const std::string nemotron = trim(raw_nemotron ? raw_nemotron : "");
+        const std::string endpoint_diagnostics =
+            endpoint_diagnostics_json(nemotron_result, end);
         ++nemotron_revision;
         emit_update(
             "segment_final", "nemotron", nemotron_revision, nemotron, start, end,
-            kNemotronAlias, {}, words_json(nemotron_result, 0.0));
+            kNemotronAlias, endpoint_diagnostics, words_json(nemotron_result, 0.0));
 
         nemo_speech_asr_recognition_options options = nemo_speech_asr_recognition_options_default();
         options.language_code = "en";
@@ -347,7 +379,7 @@ struct Cascade {
         std::string extra =
             "\"selection\":" + json_string(selection) +
             ",\"supersedes\":{\"track_id\":\"nemotron\",\"revision\":" +
-            std::to_string(nemotron_revision) + "}";
+            std::to_string(nemotron_revision) + "}," + endpoint_diagnostics;
         emit_update(
             "cascade_final", "authoritative", 1, selected, start, end, model_alias,
             extra, selected_words);

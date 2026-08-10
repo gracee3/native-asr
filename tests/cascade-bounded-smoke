@@ -18,7 +18,7 @@ datasets, audio_root = map(Path, sys.argv[1:])
 for dataset in ("librispeech-test-clean", "librispeech-test-other"):
     rows = []
     split = dataset.removeprefix("librispeech-")
-    for index in range(4):
+    for index in range(10):
         identifier = f"{split}-{index:04d}"
         audio = audio_root / f"{identifier}.wav"
         frames = 1600 + index * 160
@@ -119,18 +119,29 @@ run_fake pilot-missed-endpoint "$work/pilot-missed" >"$work/pilot-missed.out" 2>
 pilot_missed_status=$?
 run_fake pilot-extra-endpoints "$work/pilot-extra" >"$work/pilot-extra.out" 2>"$work/pilot-extra.err"
 pilot_extra_status=$?
+run_fake pilot-missed-endpoint "$work/diagnostic-missed" --limit-per-split 10 \
+  --pilot-pairs-per-split 5 --endpoint-diagnostics-only \
+  >"$work/diagnostic-missed.out" 2>"$work/diagnostic-missed.err"
+diagnostic_missed_status=$?
+run_fake pilot-extra-endpoints "$work/diagnostic-extra" --limit-per-split 10 \
+  --pilot-pairs-per-split 5 --endpoint-diagnostics-only \
+  >"$work/diagnostic-extra.out" 2>"$work/diagnostic-extra.err"
+diagnostic_extra_status=$?
 run_fake timeout "$work/timeout" --pair-timeout-seconds 0.01 >"$work/timeout.out" 2>"$work/timeout.err"
 timeout_status=$?
 run_fake deadline "$work/deadline" >"$work/deadline.out" 2>"$work/deadline.err"
 deadline_status=$?
 set -e
 [[ $pilot_status == 1 && $pilot_missed_status == 1 && $pilot_extra_status == 1
+  && $diagnostic_missed_status == 1 && $diagnostic_extra_status == 1
   && $timeout_status == 1 && $deadline_status == 1 ]]
 pilot_dir=$(find "$work/pilot/results" -mindepth 1 -maxdepth 1 -type d)
 pilot_missed_dir=$(find "$work/pilot-missed/results" -mindepth 1 -maxdepth 1 -type d)
 pilot_extra_dir=$(find "$work/pilot-extra/results" -mindepth 1 -maxdepth 1 -type d)
 timeout_dir=$(find "$work/timeout/results" -mindepth 1 -maxdepth 1 -type d)
 deadline_dir=$(find "$work/deadline/results" -mindepth 1 -maxdepth 1 -type d)
+diagnostic_missed_dir=$(find "$work/diagnostic-missed/results" -mindepth 1 -maxdepth 1 -type d)
+diagnostic_extra_dir=$(find "$work/diagnostic-extra/results" -mindepth 1 -maxdepth 1 -type d)
 jq -e '.phase == "pilot" and .pass == false' "$pilot_dir/verdict.json" >/dev/null
 [[ $(find "$pilot_dir/details" -name '*.json' | wc -l) == 1 ]]
 jq -e '.failure.kind == "endpoint_contract"' "$pilot_missed_dir/verdict.json" >/dev/null
@@ -140,5 +151,26 @@ jq -e '.failure.kind == "over_segmentation" and .extra_endpoint_pairs == 1' \
 jq -e '.failure.kind == "ModeTimeout"' "$timeout_dir/verdict.json" >/dev/null
 jq -e '.phase == "deadline" and .failed_guardrails == ["overall_deadline"]' \
   "$deadline_dir/verdict.json" >/dev/null
+
+# Diagnostic mode checkpoints all ten cascade pairs despite endpoint misses or
+# extras, never launches a baseline or later gate, and publishes no temp file.
+for diagnostic_dir in "$diagnostic_missed_dir" "$diagnostic_extra_dir"; do
+  jq -e '.phase == "endpoint_diagnostics"
+    and .diagnostic_collection_success == true
+    and .endpoint_contract_success == false
+    and .pairs == 10
+    and (.endpoint_diagnostics | length) == 10' "$diagnostic_dir/verdict.json" >/dev/null
+  [[ $(find "$diagnostic_dir/details" -name 'cascade.json' | wc -l) == 10 ]]
+  [[ -z $(find "$diagnostic_dir/details" \
+    \( -name 'parakeet.json' -o -name 'nemotron.json' \) -print -quit) ]]
+  [[ ! -e $diagnostic_dir/summary.json && ! -e $diagnostic_dir/paced_stream.json ]]
+  jq -e '.phase == "endpoint_diagnostics_complete"
+    and (.completed_modes | length) == 10' "$diagnostic_dir/state.json" >/dev/null
+  [[ -z $(find "$diagnostic_dir" -type f -name '.*' -print -quit) ]]
+done
+jq -e '.classifications.no_natural_endpoint == 10
+  and .recommended_next_repair.repair == "vad_driven_endpointing"' \
+  "$diagnostic_missed_dir/verdict.json" >/dev/null
+jq -e '.extra_endpoint_pairs == 10' "$diagnostic_extra_dir/verdict.json" >/dev/null
 
 printf '%s\n' 'bounded cascade integration smoke: ok'

@@ -92,6 +92,12 @@ an exact `supersedes` reference to the segment's Nemotron final revision and a
 `selection` of `parakeet`, `nemotron_fallback`, or `silence`. Segment IDs are
 stable while Nemotron revises them and advance only after the cascade final.
 Source ranges are contiguous and identical across both finals for a segment.
+Both final updates also carry the same schema-1 `endpoint_diagnostics` object.
+It records whether an automatic endpoint fired, the decoder clock, nullable
+last-token clock, logical threshold-crossing clock, raw audio frontier, event
+delivery position, and delivery lag. EOF finals set the endpoint clocks and
+lag to `null`. These diagnostics do not change `source_time` or endpoint
+behavior.
 
 `session_metrics` is required for success. It reports one load for each fixed
 model, native phase timings, segment/update/warning counts, and all selection
@@ -155,6 +161,19 @@ pair evaluated by the cascade, whole-recording
 Parakeet TDT, and whole-recording Nemotron in that order. Each mode and pair is
 atomically checkpointed, and resume accepts only the exact cache, image,
 model, adapter, Git, and option fingerprint.
+
+`--endpoint-diagnostics-only` runs exactly those ten cascade pilots and then
+stops: it launches no whole-recording baseline, full pair gate, or paced
+stream. Unlike the ordinary fail-fast pilot, this mode collects every pair
+despite missed or extra endpoints, while runtime and event-contract corruption
+still stop it immediately. It classifies each inserted gap as
+`logical_and_delivery_in_gap`, `logical_in_gap_delivery_late`,
+`logical_early`, `logical_late`, or `no_natural_endpoint` with the existing
+50 ms tolerance. `endpoint_diagnostics.json` reports diagnostic-collection
+success separately from endpoint-contract success, per-segment clocks,
+endpoint recall, delivery-lag percentiles, and `recommended_next_repair`.
+The command remains nonzero when collection succeeds but the endpoint contract
+fails.
 
 `--reuse-baselines-from RUN_DIR` can import successful whole-recording
 Parakeet and Nemotron details from an earlier bounded run. Reuse requires the
