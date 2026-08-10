@@ -329,6 +329,7 @@ packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).
 - [`docs/models.md`](docs/models.md) — lockfile and on-disk model contract
 - [`docs/benchmarking.md`](docs/benchmarking.md) — benchmark and accuracy metadata contract
 - [`docs/ensemble.md`](docs/ensemble.md) — deterministic consensus command and audit contract
+- [`docs/two-pass-cascade-decisions.md`](docs/two-pass-cascade-decisions.md) — two-pass cascade discussion, decisions, and research gates
 - [`docs/reproducibility-report.md`](docs/reproducibility-report.md) — validated images, run IDs, and current limitations
 - [`docs/future-ensemble-reconstruction.md`](docs/future-ensemble-reconstruction.md) — deferred LLM, concurrency, and streaming direction
 - [`docs/future-rust-tui.md`](docs/future-rust-tui.md) — deferred terminal UI and event-protocol direction
