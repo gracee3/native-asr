@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -f ${!#} ]]
+if [[ -n ${NATIVE_ASR_TEST_CASCADE_LOG:-} ]]; then
+  printf '%s\n' "$*" > "$NATIVE_ASR_TEST_CASCADE_LOG"
+fi
+jq -cn '{schema_version:1,event:"session_started"}'

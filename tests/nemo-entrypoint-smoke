@@ -21,6 +21,7 @@ ctc=$work/parakeet-ctc-1.1b.q8_0.gguf
 
 export PATH="$fixture_bin:$PATH"
 export NEMO_SPEECH_BIN=$fixture_bin/nemo-speech
+export NEMO_CASCADE_BIN=$fixture_bin/native-asr-cascade
 
 offline_json=$(
   "$entrypoint" transcribe --model "$tdt" --format json "$audio"
@@ -79,5 +80,34 @@ version_output=$(
 )
 grep -Fqx 'native_asr_runtime_version=1.0.0' <<< "$version_output"
 grep -Fqx 'ggml_revision=test-ggml' <<< "$version_output"
+
+cascade_log=$work/cascade.log
+NATIVE_ASR_TEST_CASCADE_LOG=$cascade_log \
+  "$entrypoint" cascade --session-id fixture-session \
+    --stream-model "$nemotron" --final-model "$tdt" --pace "$audio" \
+    > "$work/cascade.stdout"
+jq -e '.event == "session_started"' "$work/cascade.stdout" >/dev/null
+grep -Fq -- "--session-id fixture-session" "$cascade_log"
+grep -Fq -- "--stream-model $nemotron" "$cascade_log"
+grep -Fq -- "--final-model $tdt" "$cascade_log"
+grep -Fq -- '--pace' "$cascade_log"
+cascade_args=$(< "$cascade_log")
+normalized=${cascade_args##* }
+[[ $normalized != "$audio" && $normalized == /tmp/native-asr-cascade.*/input.wav ]]
+[[ ! -e $normalized ]]
+grep -Fq 'COPY docker/nemo-speech/native-asr-cascade.cpp' \
+  "$repo_root/docker/nemo-speech/Dockerfile"
+grep -Fq -- '--target nemo_speech_cli nemo_speech_asr_c' \
+  "$repo_root/docker/nemo-speech/Dockerfile"
+grep -Fq 'build/bin/native-asr-cascade /opt/native-asr/bin/' \
+  "$repo_root/docker/nemo-speech/Dockerfile"
+
+if "$entrypoint" cascade --session-id bad \
+    --stream-model "$tdt" --final-model "$nemotron" "$audio" \
+    > "$work/bad-cascade.stdout" 2> "$work/bad-cascade.stderr"; then
+  printf '%s\n' 'expected reversed cascade models to fail' >&2
+  exit 1
+fi
+grep -Fq 'pass one must be Nemotron' "$work/bad-cascade.stderr"
 
 printf '%s\n' 'nemo entrypoint smoke: ok'

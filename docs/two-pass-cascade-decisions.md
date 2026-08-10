@@ -1,19 +1,19 @@
 # Two-Pass Cascade Discussion and Decision Log
 
-Status: discussion only; no cascade implementation has been authorized or
-started on this branch.
+Status: implemented as an opt-in experiment on `experiment/two-pass-cascade`;
+the default ensemble remains unchanged.
 
 Last updated: 2026-08-10
 
-This log records decisions about a possible streaming-first, accurate-second
-ASR cascade. It preserves both accepted and rejected choices, their reasons,
+This log records decisions about the experimental streaming-first,
+accurate-second ASR cascade. It preserves both accepted and rejected choices, their reasons,
 and the evidence needed to revisit them. The existing deterministic three-model
 ensemble remains the default on `main`; the local-LLM experiments remain
 isolated on their experiment branches.
 
 ## Current direction
 
-The next implementation candidate is an operational two-pass cascade:
+The implemented experimental direction is an operational two-pass cascade:
 
 ```text
 audio
@@ -23,7 +23,7 @@ audio
   -> archival three-model consensus: optional offline mode, not on the live path
 ```
 
-The first version would not use an LLM. It would preserve explicit provisional,
+The first version does not use an LLM. It preserves explicit provisional,
 segment-final, cascade-final, and archival-final states so downstream consumers
 can distinguish low-latency text from later replacements.
 
@@ -77,12 +77,12 @@ a reason to block protocol work.
 | ID | Decision | Status | Reason and revisit condition |
 |---|---|---|---|
 | C-01 | Preserve the three-model deterministic ensemble as an offline/archival mode. | Yes | It is implemented, auditable, and sometimes improves results. Its mixed held-out result means it should not be assumed superior on every corpus. |
-| C-02 | Begin the operational two-pass cascade before the entire benchmark matrix finishes. | Yes | Architecture, state semantics, persistence, and failure handling do not depend on the final model ranking. No implementation is included in this discussion branch. |
+| C-02 | Begin the operational two-pass cascade before the entire benchmark matrix finishes. | Implemented | Architecture, state semantics, persistence, and failure handling do not depend on the final model ranking. Benchmark suites remain gated on explicit confirmation. |
 | C-03 | Require the entire remaining benchmark matrix before prototype work. | No | It costs roughly 13-15 hours and would not resolve the protocol questions. Require evidence before promotion instead. |
 | C-04 | Use Nemotron streaming followed by Parakeet as the first research pairing. | Provisional yes | Both are already pinned and locally exercised, and their roles fit the topology. Revisit after full `test-other`, paced-stream, and cascade-specific measurements. |
 | C-05 | Put an LLM adjudicator in cascade version one. | No | The local tie-only experiments did not establish a dependable accuracy/latency benefit. Keep the first cascade deterministic so the topology is the isolated variable. |
 | C-06 | Patch upstream to get genuine Nemotron partial results. | No | The pinned NeMo-Speech.cpp C API already supports stream push, result polling, partial/final flags, forced endpoints, and finish. A repository-owned persistent wrapper can expose those features. Sherpa also exposes a stateful online recognizer API. |
-| C-07 | Add a local persistent streaming worker/session protocol in a later implementation turn. | Yes, deferred | The current CLI lifecycle does not expose the already available native stream events efficiently. This is local integration work, not an upstream prerequisite. |
+| C-07 | Add a local persistent streaming worker/session protocol. | Implemented | The repository-owned native adapter exposes the pinned C API's partial/final stream and keeps both recognizers loaded once in one process. |
 | C-08 | Assume the pinned NeMo-Speech.cpp runtime already supplies usable N-best hypotheses. | No | Its public result shape permits alternatives, but the pinned implementation documents one greedy hypothesis today. This blocks standard N-best rescoring, not partial streaming. |
 | C-09 | Require upstream work for NeMo-Speech.cpp N-best output. | Likely | True beam N-best hypotheses and scores appear to need upstream implementation or a local upstream-quality patch. Alternatives are a different decoder/runtime or a separate research stack. Confirm before choosing the integration path. |
 | C-10 | Add NVIDIA neural rescoring to the first cascade prototype. | No | It first needs a reliable N-best source and tuning data. Evaluate it as a later deterministic accuracy layer, not as a prerequisite for operational two-pass work. |
@@ -91,6 +91,10 @@ a reason to block protocol work.
 | C-13 | Evaluate a pretrained English WeNet U2++ system as a challenger. | Yes, deferred | It is a proven, coherent two-pass design and can run on x86 CPU. Do not replace current models or commit to training until artifact, license, accuracy, RTF, and RSS are measured locally. |
 | C-14 | Train or fine-tune a new model now. | No | First measure pretrained systems and establish the operational cascade. Training would add data, GPU, reproducibility, and maintenance variables prematurely. |
 | C-15 | Preserve distinct provisional and final transcript states. | Yes | A streaming cascade must make revisions explicit; silently overwriting partial text would create ambiguous downstream behavior and weak auditability. |
+| C-16 | Endpoint only on upstream 800 ms token silence or EOF. | Implemented | It avoids synthetic duration cuts and makes each Parakeet slice correspond to the recorded first-pass boundary. Pause-free latency remains unbounded and documented. |
+| C-17 | Run Parakeet synchronously on every endpointed slice. | Implemented | Version one isolates the topology without confidence gating or concurrent CPU contention. |
+| C-18 | Make valid Parakeet text authoritative and explicitly fall back to Nemotron on empty/error. | Implemented | Selection is deterministic, warning-backed, counted, and represented on the authoritative track; both-empty becomes a silence segment. |
+| C-19 | Publish a private no-overwrite audit bundle and live schema-1 JSONL. | Implemented | Revision transitions, timestamps, provenance, load counts, timings, peak RSS, failures, and cancellation remain inspectable. |
 
 ## What NVIDIA neural rescoring is
 
@@ -141,21 +145,15 @@ pinned pretrained English U2++ checkpoint, with no claim about real-time
 performance until RTF and memory are measured. It would be a competing cascade
 mode, not an extra stage stacked after the current models.
 
-## Open questions before implementation
+## Resolved version-one implementation questions
 
-- Which native Nemotron path should own the first prototype: the already pinned
-  NeMo-Speech.cpp C API, or Sherpa's online recognizer?
-- Should accurate second-pass work run per endpointed segment, in a short
-  overlapping window, or over a completed recording? This changes correction
-  quality and perceived latency.
-- What is the replacement contract for timestamps, word confidence, punctuation,
-  and downstream consumers when pass two changes pass one text?
-- Does the first-pass decoder expose enough uncertainty to avoid running pass two
-  on every segment, or should version one always run it for clean attribution?
-- Which runtime can provide scored N-best hypotheses without compromising the
-  native, reproducible deployment boundary?
-- What latency and memory budgets define success on this CPU-only host, and what
-  optional GPU profile is worth maintaining?
+- The prototype uses the pinned NeMo-Speech.cpp C API for both passes.
+- Parakeet runs per exact natural endpoint/EOF slice, without overlap.
+- Track/revision/supersession fields make replacements explicit. Both tracks use
+  source time; Parakeet's segment-relative words are offset to that time.
+- Pass two runs on every segment in version one; no uncertainty gate is used.
+- Scored N-best, neural rescoring, model-pair promotion, latency budgets, and an
+  optional GPU profile remain later evidence-gated research questions.
 
 ## Primary references
 

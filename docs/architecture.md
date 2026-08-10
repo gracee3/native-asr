@@ -46,8 +46,9 @@ and source trees out of the final stage.
 The NeMo-Speech.cpp image builds the pinned ASR CLI and shared library against
 its exact ggml submodule. CUDA, Metal, Vulkan, HTTP, gRPC, NMT, TTS,
 diarization, examples, tests, and tools are disabled. The final stage contains
-the staged native libraries, SentencePiece, FFmpeg, and jq, but no compiler,
-source checkout, Python, PyTorch, or NVIDIA NeMo framework.
+the staged native libraries, repository-owned native cascade adapter,
+SentencePiece, FFmpeg, and jq, but no compiler, source checkout, Python,
+PyTorch, or NVIDIA NeMo framework.
 
 NeMo-Speech.cpp 1.0.0 currently passes a literal four threads to ggml ASR graph
 execution. The host and container wrappers enforce and record four until the
@@ -89,3 +90,12 @@ three configured models before starting, then invokes one complete measured
 host-only standard-library consensus layer preserves the three native results,
 aligns normalized lexical tokens to the first track, and publishes the audit
 directory atomically. It does not place Python or model data in a runtime image.
+
+The experimental `scripts/cascade` uses a separate, stricter boundary. It
+verifies both fixed NeMo artifacts and the image, then runs one measured,
+network-disabled, read-only-root container process. Inside it, one native
+adapter loads Nemotron and Parakeet once each, streams 20 ms chunks through
+Nemotron, and synchronously decodes every naturally endpointed slice through
+the persistent Parakeet recognizer. The host validates and relays live JSONL,
+keeps stderr separate, and atomically publishes a private audit directory. It
+does not change the default three-model ensemble.

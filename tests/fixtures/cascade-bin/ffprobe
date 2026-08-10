@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${NATIVE_ASR_TEST_AUDIO_DURATION:-3.5}"

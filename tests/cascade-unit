@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+PYTHONPATH="$repo_root/scripts/lib" python3 - <<'PY'
+from cascade import EventValidator, NEMOTRON_ALIAS, PARAKEET_ALIAS, assemble_transcript
+
+
+def common(sequence, kind, position, **extra):
+    return {
+        "schema_version": 1, "session_id": "unit", "sequence": sequence,
+        "event": kind, "emitted_monotonic_seconds": sequence / 100,
+        "audio_position_seconds": position, **extra,
+    }
+
+
+validator = EventValidator("unit")
+validator.accept(common(
+    1, "session_started", 0, models=[NEMOTRON_ALIAS, PARAKEET_ALIAS],
+    chunk_milliseconds=20,
+    endpointing={"kind": "token_silence", "silence_milliseconds": 800}, paced=False,
+))
+validator.accept(common(
+    2, "transcript_update", 0.5, segment_id="segment-000001", track_id="nemotron",
+    revision=1, state="provisional", text="draft",
+    source_time={"start_seconds": 0.0, "end_seconds": 0.5}, model_alias=NEMOTRON_ALIAS,
+))
+validator.accept(common(
+    3, "transcript_update", 1.0, segment_id="segment-000001", track_id="nemotron",
+    revision=2, state="segment_final", text="upstream",
+    source_time={"start_seconds": 0.0, "end_seconds": 1.0}, model_alias=NEMOTRON_ALIAS,
+    words=[{"word": "upstream", "start_seconds": 0.1, "end_seconds": 0.8}],
+))
+validator.accept(common(
+    4, "transcript_update", 1.0, segment_id="segment-000001", track_id="authoritative",
+    revision=1, state="cascade_final", text="accurate",
+    source_time={"start_seconds": 0.0, "end_seconds": 1.0}, model_alias=PARAKEET_ALIAS,
+    selection="parakeet", supersedes={"track_id": "nemotron", "revision": 2},
+    words=[{"word": "accurate", "start_seconds": 0.2, "end_seconds": 0.9}],
+))
+assert assemble_transcript(validator.segments) == "accurate"
+
+# Identical consecutive partials are malformed and do not consume a revision.
+duplicate = EventValidator("unit")
+duplicate.accept(common(
+    1, "session_started", 0, models=[NEMOTRON_ALIAS, PARAKEET_ALIAS],
+    chunk_milliseconds=20,
+    endpointing={"kind": "token_silence", "silence_milliseconds": 800}, paced=False,
+))
+partial = common(
+    2, "transcript_update", 0.2, segment_id="segment-000001", track_id="nemotron",
+    revision=1, state="provisional", text="same",
+    source_time={"start_seconds": 0.0, "end_seconds": 0.2}, model_alias=NEMOTRON_ALIAS,
+)
+duplicate.accept(partial)
+try:
+    duplicate.accept({**partial, "sequence": 3, "revision": 2, "audio_position_seconds": 0.4,
+                      "source_time": {"start_seconds": 0.0, "end_seconds": 0.4}})
+except ValueError as error:
+    assert "identical" in str(error)
+else:
+    raise AssertionError("duplicate partial accepted")
+
+# Selection semantics are explicit: fallback equals Nemotron and silence is empty.
+fallback = EventValidator("unit")
+fallback.accept(common(
+    1, "session_started", 0, models=[NEMOTRON_ALIAS, PARAKEET_ALIAS],
+    chunk_milliseconds=20,
+    endpointing={"kind": "token_silence", "silence_milliseconds": 800}, paced=True,
+))
+fallback.accept(common(
+    2, "transcript_update", 1, segment_id="segment-000001", track_id="nemotron",
+    revision=1, state="segment_final", text="fallback",
+    source_time={"start_seconds": 0.0, "end_seconds": 1.0}, model_alias=NEMOTRON_ALIAS,
+))
+fallback.accept(common(
+    3, "session_warning", 1, code="pass_two_empty", message="empty",
+))
+fallback.accept(common(
+    4, "transcript_update", 1, segment_id="segment-000001", track_id="authoritative",
+    revision=1, state="cascade_final", text="fallback",
+    source_time={"start_seconds": 0.0, "end_seconds": 1.0}, model_alias=NEMOTRON_ALIAS,
+    selection="nemotron_fallback", supersedes={"track_id": "nemotron", "revision": 1},
+))
+assert fallback.segments[0]["authoritative"]["selection"] == "nemotron_fallback"
+
+# Timestamp offsets are enforced against exact endpointed source ranges.
+bad_time = {**common(
+    5, "transcript_update", 2, segment_id="segment-000002", track_id="nemotron",
+    revision=1, state="segment_final", text="second",
+    source_time={"start_seconds": 1.0, "end_seconds": 2.0}, model_alias=NEMOTRON_ALIAS,
+)}
+fallback.accept(bad_time)
+bad_authoritative = common(
+    6, "transcript_update", 2, segment_id="segment-000002", track_id="authoritative",
+    revision=1, state="cascade_final", text="accurate",
+    source_time={"start_seconds": 1.0, "end_seconds": 2.0}, model_alias=PARAKEET_ALIAS,
+    selection="parakeet", supersedes={"track_id": "nemotron", "revision": 1},
+    words=[{"word": "bad", "start_seconds": 0.1, "end_seconds": 0.2}],
+)
+try:
+    fallback.accept(bad_authoritative)
+except ValueError as error:
+    assert "outside" in str(error)
+else:
+    raise AssertionError("unoffset second-segment word accepted")
+
+print("cascade unit tests: ok")
+PY

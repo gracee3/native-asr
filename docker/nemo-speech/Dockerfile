@@ -33,6 +33,7 @@ RUN git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/NeMo-Sp
     && test "$(git -C ggml rev-parse HEAD)" = "${GGML_REVISION}"
 
 WORKDIR /src/nemo-speech
+COPY docker/nemo-speech/native-asr-cascade.cpp /tmp/native-asr-cascade.cpp
 RUN cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_AVX=ON \
@@ -61,10 +62,14 @@ RUN cmake -S . -B build -G Ninja \
         -DNEMO_SPEECH_WITH_GRPC=OFF \
         -DNEMO_SPEECH_WITH_NMT=OFF \
         -DNEMO_SPEECH_WITH_NORM=OFF \
-    && cmake --build build --parallel --target nemo_speech_cli \
+    && cmake --build build --parallel --target nemo_speech_cli nemo_speech_asr_c \
+    && c++ -std=c++17 -O3 -I include /tmp/native-asr-cascade.cpp \
+        -L build/bin -Wl,-rpath-link,build/bin -lnemo_speech_asr_c \
+        -o build/bin/native-asr-cascade \
     && install -d /opt/native-asr/bin /opt/native-asr/lib \
         /opt/native-asr/share/licenses/nemo-speech/ggml \
     && install -m 0755 build/bin/nemo-speech /opt/native-asr/bin/ \
+    && install -m 0755 build/bin/native-asr-cascade /opt/native-asr/bin/ \
     && for library in build/bin/libggml*.so* build/bin/libnemo_speech*.so*; \
       do test -e "$library" && cp -a "$library" /opt/native-asr/lib/; done \
     && install -m 0644 LICENSE NOTICE THIRD_PARTY_NOTICES.md \
@@ -72,11 +77,15 @@ RUN cmake -S . -B build -G Ninja \
     && install -m 0644 ggml/LICENSE \
         /opt/native-asr/share/licenses/nemo-speech/ggml/ \
     && patchelf --set-rpath '$ORIGIN/../lib' /opt/native-asr/bin/nemo-speech \
+    && patchelf --set-rpath '$ORIGIN/../lib' /opt/native-asr/bin/native-asr-cascade \
     && find /opt/native-asr/lib -type f -name '*.so*' -exec \
         patchelf --set-rpath '$ORIGIN' {} \; \
     && test "$(patchelf --print-rpath /opt/native-asr/bin/nemo-speech)" = '$ORIGIN/../lib' \
+    && test "$(patchelf --print-rpath /opt/native-asr/bin/native-asr-cascade)" = '$ORIGIN/../lib' \
     && ldd /opt/native-asr/bin/nemo-speech \
-    && ! ldd /opt/native-asr/bin/nemo-speech | grep -F 'not found'
+    && ! ldd /opt/native-asr/bin/nemo-speech | grep -F 'not found' \
+    && ldd /opt/native-asr/bin/native-asr-cascade \
+    && ! ldd /opt/native-asr/bin/native-asr-cascade | grep -F 'not found'
 
 FROM ${BASE_IMAGE} AS runtime
 
@@ -114,7 +123,8 @@ ENV HOME=/tmp \
     NATIVE_ASR_RUNTIME_REVISION=${NEMO_SPEECH_REVISION} \
     NATIVE_ASR_GGML_REVISION=${GGML_REVISION} \
     NATIVE_ASR_NEMO_CPU_THREADS=4 \
-    NEMO_SPEECH_BIN=/opt/native-asr/bin/nemo-speech
+    NEMO_SPEECH_BIN=/opt/native-asr/bin/nemo-speech \
+    NEMO_CASCADE_BIN=/opt/native-asr/bin/native-asr-cascade
 
 USER 65532:65532
 WORKDIR /work

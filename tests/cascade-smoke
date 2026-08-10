@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-cascade-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+models=$work/models
+manifest=$work/models.lock
+mkdir -p "$models/nemo-speech/nemotron-streaming-en" "$models/nemo-speech/parakeet-tdt-v3"
+: > "$models/nemo-speech/nemotron-streaming-en/nemotron-speech-streaming-en-0.6b.q8_0.gguf"
+: > "$models/nemo-speech/parakeet-tdt-v3/parakeet-tdt-0.6b-v3.q8_0.gguf"
+: > "$work/input.wav"
+cat > "$manifest" <<'EOF'
+nemo-stream|nemo:nemotron-streaming-en|nemo-speech|Test Nemotron|https://invalid.example/stream|stream-rev|nemotron-speech-streaming-en-0.6b.q8_0.gguf|nemo-speech/nemotron-streaming-en/nemotron-speech-streaming-en-0.6b.q8_0.gguf|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|NVIDIA-Open-Model-License|file||test
+nemo-final|nemo:parakeet-tdt-v3|nemo-speech|Test Parakeet|https://invalid.example/final|final-rev|parakeet-tdt-0.6b-v3.q8_0.gguf|nemo-speech/parakeet-tdt-v3/parakeet-tdt-0.6b-v3.q8_0.gguf|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|CC-BY-4.0|file||test
+EOF
+
+export PATH="$repo_root/tests/fixtures/cascade-bin:$PATH"
+export NATIVE_ASR_CONTAINER_ENGINE=docker
+export NATIVE_ASR_MODELS=$models
+export NATIVE_ASR_MODEL_MANIFEST=$manifest
+export NATIVE_ASR_TEST_DOCKER_LOG=$work/docker.log
+
+bundle=$work/complete
+"$repo_root/scripts/cascade" --output "$bundle" "$work/input.wav" \
+  > "$work/complete.stdout" 2> "$work/complete.stderr"
+[[ $(wc -l < "$work/complete.stdout") == 9 ]]
+jq -e '
+  .status == "complete"
+  and .text == "first accurate second accurate"
+  and [.models[].load_count] == [1,1]
+  and .container.image_id == "sha256:test-cascade-image"
+  and .container.network == "none"
+  and (.provenance.git_revision | length == 40)
+  and (.provenance.adapter_sha256 | length == 64)
+  and .counts.segments == 2
+  and .counts.parakeet_segments == 2
+  and .artifacts.events == "events.jsonl"
+' "$bundle/result.json" >/dev/null
+[[ $(< "$bundle/transcript.txt") == 'first accurate second accurate' ]]
+jq -e '.segments | length == 2
+  and .[0].authoritative.selection == "parakeet"
+  and .[1].authoritative.words[0].start_seconds == 1.7' "$bundle/segments.json" >/dev/null
+jq -s -e 'length == 9 and .[0].event == "session_started"
+  and .[-2].event == "session_metrics" and .[-1].event == "session_completed"
+  and ([.[].sequence] == [1,2,3,4,5,6,7,8,9])' "$bundle/events.jsonl" >/dev/null
+grep -Fq 'fake cascade diagnostic' "$bundle/logs/runtime.stderr.log"
+grep -Fq -- '--network none' "$work/docker.log"
+grep -Fq -- '--read-only' "$work/docker.log"
+grep -Fq -- 'target=/models,readonly' "$work/docker.log"
+grep -Fq -- 'target=/audio,readonly' "$work/docker.log"
+grep -Fq -- '--stream-model /models/nemotron-streaming-en/nemotron-speech-streaming-en-0.6b.q8_0.gguf' "$work/docker.log"
+grep -Fq -- '--final-model /models/parakeet-tdt-v3/parakeet-tdt-0.6b-v3.q8_0.gguf' "$work/docker.log"
+
+# Pass-two empty output is auditable but remains a successful Nemotron fallback.
+export NATIVE_ASR_TEST_CASCADE_MODE=fallback
+export NATIVE_ASR_TEST_AUDIO_DURATION=1.5
+fallback=$work/fallback
+"$repo_root/scripts/cascade" --output "$fallback" --pace "$work/input.wav" \
+  > "$work/fallback.stdout" 2> "$work/fallback.stderr"
+unset NATIVE_ASR_TEST_CASCADE_MODE NATIVE_ASR_TEST_AUDIO_DURATION
+jq -e '.status == "complete" and .text == "first upstream"
+  and .counts.nemotron_fallbacks == 1 and .counts.warnings == 1
+  and .policy.pacing == "real_time"' "$fallback/result.json" >/dev/null
+jq -e '.segments[0].authoritative.selection == "nemotron_fallback"' \
+  "$fallback/segments.json" >/dev/null
+
+for fallback_mode in error silence; do
+  export NATIVE_ASR_TEST_CASCADE_MODE=$fallback_mode
+  export NATIVE_ASR_TEST_AUDIO_DURATION=1.5
+  "$repo_root/scripts/cascade" --output "$work/$fallback_mode" "$work/input.wav" \
+    > "$work/$fallback_mode.stdout" 2> "$work/$fallback_mode.stderr"
+done
+unset NATIVE_ASR_TEST_CASCADE_MODE NATIVE_ASR_TEST_AUDIO_DURATION
+jq -e '.status == "complete" and .counts.nemotron_fallbacks == 1
+  and .counts.warnings == 1' "$work/error/result.json" >/dev/null
+jq -e '.status == "complete" and .text == "" and .counts.silence_segments == 1' \
+  "$work/silence/result.json" >/dev/null
+jq -e '.segments[0].authoritative.selection == "silence"' \
+  "$work/silence/segments.json" >/dev/null
+
+# Malformed JSONL, missing metrics, and runtime failures publish failed evidence.
+for mode in malformed missing_metrics failure; do
+  export NATIVE_ASR_TEST_CASCADE_MODE=$mode
+  set +e
+  "$repo_root/scripts/cascade" --output "$work/$mode" "$work/input.wav" \
+    > "$work/$mode.stdout" 2> "$work/$mode.stderr"
+  status=$?
+  set -e
+  [[ $status == 1 && -f $work/$mode/result.json && ! -e $work/$mode/transcript.txt ]]
+  jq -e '.status == "failed" and .failure != null' "$work/$mode/result.json" >/dev/null
+done
+unset NATIVE_ASR_TEST_CASCADE_MODE
+
+# Output publication is invisible while the measured runtime is active.
+export NATIVE_ASR_TEST_CASCADE_MODE=delay
+export NATIVE_ASR_TEST_STARTED=$work/atomic.started
+atomic=$work/atomic
+"$repo_root/scripts/cascade" --output "$atomic" "$work/input.wav" \
+  > "$work/atomic.stdout" 2> "$work/atomic.stderr" &
+atomic_pid=$!
+for _ in $(seq 1 100); do [[ -e $NATIVE_ASR_TEST_STARTED ]] && break; sleep 0.02; done
+[[ -e $NATIVE_ASR_TEST_STARTED && ! -e $atomic ]]
+kill -TERM "$atomic_pid"
+set +e
+wait "$atomic_pid"
+status=$?
+set -e
+unset NATIVE_ASR_TEST_CASCADE_MODE NATIVE_ASR_TEST_STARTED
+[[ $status == 130 && -f $atomic/result.json && ! -e $atomic/transcript.txt ]]
+jq -e '.status == "cancelled" and .failure.stage == "cancellation"' "$atomic/result.json" >/dev/null
+jq -s -e '.[-1].event == "session_cancelled"' "$atomic/events.jsonl" >/dev/null
+
+# A destination that appears after preflight wins the race and is not replaced.
+export NATIVE_ASR_TEST_CASCADE_MODE=delay
+export NATIVE_ASR_TEST_DELAY_SECONDS=0.3
+export NATIVE_ASR_TEST_STARTED=$work/race.started
+race=$work/race
+"$repo_root/scripts/cascade" --output "$race" "$work/input.wav" \
+  > "$work/race.stdout" 2> "$work/race.stderr" &
+race_pid=$!
+for _ in $(seq 1 100); do [[ -e $NATIVE_ASR_TEST_STARTED ]] && break; sleep 0.02; done
+[[ -e $NATIVE_ASR_TEST_STARTED ]]
+mkdir "$race"
+printf '%s\n' race-winner > "$race/keep"
+set +e
+wait "$race_pid"
+status=$?
+set -e
+unset NATIVE_ASR_TEST_CASCADE_MODE NATIVE_ASR_TEST_DELAY_SECONDS NATIVE_ASR_TEST_STARTED
+[[ $status == 1 && $(< "$race/keep") == race-winner ]]
+
+# Existing output paths are strict preflight errors and private modes survive rename.
+mkdir "$work/existing"
+printf '%s\n' sentinel > "$work/existing/keep"
+set +e
+"$repo_root/scripts/cascade" --output "$work/existing" "$work/input.wav" >/dev/null 2>&1
+status=$?
+set -e
+[[ $status == 2 && $(< "$work/existing/keep") == sentinel ]]
+while IFS= read -r mode; do [[ $mode == 700 ]]; done < <(find "$bundle" -type d -printf '%m\n')
+while IFS= read -r mode; do [[ $mode == 600 ]]; done < <(find "$bundle" -type f -printf '%m\n')
+
+printf '%s\n' 'cascade integration smoke: ok'

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 nemo_bin=${NEMO_SPEECH_BIN:-/opt/native-asr/bin/nemo-speech}
+cascade_bin=${NEMO_CASCADE_BIN:-/opt/native-asr/bin/native-asr-cascade}
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -12,6 +13,8 @@ usage() {
   cat <<'EOF'
 Usage:
   native-asr-nemo transcribe --model MODEL_GGUF [OPTIONS] AUDIO
+  native-asr-nemo cascade --session-id ID --stream-model NEMOTRON_GGUF \
+    --final-model PARAKEET_GGUF [--pace] AUDIO
   native-asr-nemo version
 
 Options:
@@ -170,6 +173,71 @@ transcribe() {
   emit_result "$result_file" "$format"
 }
 
+cascade() {
+  local session_id='' stream_model='' final_model='' audio='' pace=false
+  while (($#)); do
+    case $1 in
+      --session-id)
+        (($# >= 2)) || die '--session-id requires a value'
+        session_id=$2
+        shift 2
+        ;;
+      --stream-model)
+        (($# >= 2)) || die '--stream-model requires a GGUF file'
+        stream_model=$2
+        shift 2
+        ;;
+      --final-model)
+        (($# >= 2)) || die '--final-model requires a GGUF file'
+        final_model=$2
+        shift 2
+        ;;
+      --pace)
+        pace=true
+        shift
+        ;;
+      --help|-h)
+        usage
+        return 0
+        ;;
+      --*) die "unknown option: $1" ;;
+      *)
+        [[ -z $audio ]] || die 'only one audio input is supported'
+        audio=$1
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n $session_id ]] || die '--session-id is required'
+  [[ -r $stream_model ]] || die "stream model GGUF is not readable: $stream_model"
+  [[ -r $final_model ]] || die "final model GGUF is not readable: $final_model"
+  [[ $(basename -- "$stream_model") == nemotron-speech-streaming-en-0.6b.q8_0.gguf ]] || \
+    die 'cascade pass one must be Nemotron Streaming EN'
+  [[ $(basename -- "$final_model") == parakeet-tdt-0.6b-v3.q8_0.gguf ]] || \
+    die 'cascade pass two must be Parakeet TDT v3'
+  [[ -n $audio && -r $audio ]] || die "audio input is not readable: $audio"
+  [[ -x $cascade_bin ]] || die "cascade adapter is not executable: $cascade_bin"
+
+  local work
+  work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-cascade.XXXXXX")
+  local work_quoted
+  printf -v work_quoted '%q' "$work"
+  trap "rm -rf -- $work_quoted" EXIT
+  local normalized=$work/input.wav
+  ffmpeg -nostdin -hide_banner -loglevel error -y \
+    -i "$audio" -map_metadata -1 -vn -sn -dn \
+    -ar 16000 -ac 1 -c:a pcm_s16le "$normalized"
+
+  local -a args=(
+    --session-id "$session_id"
+    --stream-model "$stream_model"
+    --final-model "$final_model"
+  )
+  [[ $pace == false ]] || args+=(--pace)
+  "$cascade_bin" "${args[@]}" "$normalized"
+}
+
 if (($#)); then
   command=$1
   shift
@@ -178,6 +246,7 @@ else
 fi
 case $command in
   transcribe) transcribe "$@" ;;
+  cascade) cascade "$@" ;;
   version|versions|--version) version ;;
   help|--help|-h) usage ;;
   *) die "unknown command: $command" ;;

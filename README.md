@@ -250,6 +250,30 @@ their evidence but do not publish an authoritative transcript. See
 [`docs/ensemble.md`](docs/ensemble.md) for ordering overrides, exit statuses,
 alignment rules, timing semantics, and the complete artifact contract.
 
+## Experimental two-pass cascade
+
+Run the opt-in recorded-file Nemotron streaming to Parakeet TDT cascade:
+
+```bash
+just cascade recording.m4a recording.cascade
+# live source cadence:
+./scripts/cascade --output recording.cascade --pace recording.m4a
+```
+
+The command emits live schema-1 JSONL on stdout and diagnostics on stderr. It
+loads both fixed models once in one CPU process, uses genuine Nemotron partials
+and natural 800 ms token-silence endpoints, and runs Parakeet synchronously on
+each exact endpointed slice. Successful Parakeet text replaces the corresponding
+Nemotron segment; empty/error output falls back explicitly and is counted.
+
+This is an experimental recorded-file mode, not the default ensemble. It has
+no microphone capture, LLM, confidence gate, concurrent inference, or forced
+duration boundaries. Pause-free speech can therefore delay the second pass
+until EOF. Output is a private, atomic audit bundle with validated events,
+segment revisions, source/model/image/Git provenance, timings, peak RSS, and
+runtime logs. See [`docs/cascade.md`](docs/cascade.md) for the complete command,
+event, failure, and artifact contract.
+
 ## Benchmarking
 
 Append a provenance-rich JSONL result and print a concise summary:
@@ -329,7 +353,8 @@ packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).
 - [`docs/models.md`](docs/models.md) — lockfile and on-disk model contract
 - [`docs/benchmarking.md`](docs/benchmarking.md) — benchmark and accuracy metadata contract
 - [`docs/ensemble.md`](docs/ensemble.md) — deterministic consensus command and audit contract
-- [`docs/two-pass-cascade-decisions.md`](docs/two-pass-cascade-decisions.md) — two-pass cascade discussion, decisions, and research gates
+- [`docs/cascade.md`](docs/cascade.md) — experimental command, live event, and audit contract
+- [`docs/two-pass-cascade-decisions.md`](docs/two-pass-cascade-decisions.md) — two-pass cascade decisions and research gates
 - [`docs/reproducibility-report.md`](docs/reproducibility-report.md) — validated images, run IDs, and current limitations
 - [`docs/future-ensemble-reconstruction.md`](docs/future-ensemble-reconstruction.md) — deferred LLM, concurrency, and streaming direction
 - [`docs/future-rust-tui.md`](docs/future-rust-tui.md) — deferred terminal UI and event-protocol direction

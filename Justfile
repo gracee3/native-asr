@@ -64,6 +64,10 @@ transcribe alias audio:
 ensemble audio output:
     @./scripts/ensemble --output {{ quote(output) }} {{ quote(audio) }}
 
+# Run the experimental recorded-file Nemotron -> Parakeet cascade.
+cascade audio output:
+    @./scripts/cascade --output {{ quote(output) }} {{ quote(audio) }}
+
 # Benchmark one model/audio pair and append a provenance-rich JSONL record.
 bench alias audio:
     @./scripts/benchmark {{ quote(alias) }} {{ quote(audio) }}

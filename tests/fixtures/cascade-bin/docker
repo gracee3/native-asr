@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -n ${NATIVE_ASR_TEST_DOCKER_LOG:-} ]]; then
+  printf '%s\n' "$*" >> "$NATIVE_ASR_TEST_DOCKER_LOG"
+fi
+if [[ ${1:-} == image && ${2:-} == inspect ]]; then
+  printf '%s\n' 'sha256:test-cascade-image'
+  exit 0
+fi
+if [[ ${1:-} == rm && ${2:-} == --force ]]; then
+  exit 0
+fi
+
+session=''
+previous=''
+for argument in "$@"; do
+  if [[ $previous == --session-id ]]; then session=$argument; fi
+  previous=$argument
+done
+[[ -n $session ]]
+
+event() {
+  local sequence=$1 kind=$2 position=$3 extra=$4
+  jq -cn \
+    --arg session "$session" --arg event "$kind" \
+    --argjson sequence "$sequence" --argjson position "$position" \
+    --argjson extra "$extra" \
+    '$extra + {schema_version:1,session_id:$session,sequence:$sequence,event:$event,
+      emitted_monotonic_seconds:($sequence / 100),audio_position_seconds:$position}'
+}
+
+started='{"models":["nemo:nemotron-streaming-en","nemo:parakeet-tdt-v3"],
+  "chunk_milliseconds":20,"endpointing":{"kind":"token_silence","silence_milliseconds":800},
+  "paced":false}'
+if printf '%s\n' "$*" | grep -Fq -- '--pace'; then
+  started=${started/false/true}
+fi
+event 1 session_started 0 "$started"
+
+mode=${NATIVE_ASR_TEST_CASCADE_MODE:-complete}
+if [[ $mode == delay ]]; then
+  : > "${NATIVE_ASR_TEST_STARTED:?}"
+  trap 'exit 143' TERM INT
+  sleep "${NATIVE_ASR_TEST_DELAY_SECONDS:-30}"
+fi
+if [[ $mode == malformed ]]; then
+  printf '%s\n' '{not-json'
+  printf 'NATIVE_ASR_TIME\t0.20\t0.10\t9000\t0\n' >&2
+  exit 0
+fi
+if [[ $mode == failure ]]; then
+  event 2 session_error 0.5 '{"stage":"pass_one","message":"forced pass-one failure"}'
+  printf 'fake cascade diagnostic\nNATIVE_ASR_TIME\t0.20\t0.10\t9000\t7\n' >&2
+  exit 7
+fi
+if [[ $mode == missing_metrics ]]; then
+  event 2 session_completed 3.5 '{"text":"","segment_count":0}'
+  printf 'NATIVE_ASR_TIME\t0.20\t0.10\t9000\t0\n' >&2
+  exit 0
+fi
+
+if [[ $mode == silence ]]; then
+  event 2 transcript_update 1.5 '{"segment_id":"segment-000001","track_id":"nemotron",
+    "revision":1,"state":"segment_final","text":"",
+    "source_time":{"start_seconds":0,"end_seconds":1.5},
+    "model_alias":"nemo:nemotron-streaming-en","words":[]}'
+  event 3 session_warning 1.5 '{"code":"pass_two_empty","message":"both passes empty",
+    "segment_id":"segment-000001","model_alias":"nemo:parakeet-tdt-v3"}'
+  event 4 transcript_update 1.5 '{"segment_id":"segment-000001","track_id":"authoritative",
+    "revision":1,"state":"cascade_final","text":"",
+    "source_time":{"start_seconds":0,"end_seconds":1.5},"model_alias":null,
+    "selection":"silence","supersedes":{"track_id":"nemotron","revision":1},"words":[]}'
+  event 5 session_metrics 1.5 '{"model_load_counts":{"nemo:nemotron-streaming-en":1,
+    "nemo:parakeet-tdt-v3":1},"timing":{"inference_seconds":0.4,"pass_two_seconds":0.1},
+    "counts":{"segments":1,"provisional_updates":0,"parakeet_segments":0,
+    "nemotron_fallbacks":0,"silence_segments":1,"warnings":1}}'
+  event 6 session_completed 1.5 '{"text":"","segment_count":1}'
+  printf 'fake cascade diagnostic\nNATIVE_ASR_TIME\t0.20\t0.10\t9000\t0\n' >&2
+  exit 0
+fi
+
+event 2 transcript_update 0.6 '{"segment_id":"segment-000001","track_id":"nemotron",
+  "revision":1,"state":"provisional","text":"first draft",
+  "source_time":{"start_seconds":0,"end_seconds":0.6},
+  "model_alias":"nemo:nemotron-streaming-en"}'
+event 3 transcript_update 1.5 '{"segment_id":"segment-000001","track_id":"nemotron",
+  "revision":2,"state":"segment_final","text":"first upstream",
+  "source_time":{"start_seconds":0,"end_seconds":1.5},
+  "model_alias":"nemo:nemotron-streaming-en",
+  "words":[{"word":"first","start_seconds":0.1,"end_seconds":0.5}]}'
+
+if [[ $mode == fallback || $mode == error ]]; then
+  warning_code=pass_two_empty
+  warning_message='Parakeet empty; fallback'
+  if [[ $mode == error ]]; then
+    warning_code=pass_two_error
+    warning_message='Parakeet error; fallback'
+  fi
+  warning_json=$(jq -cn --arg code "$warning_code" --arg message "$warning_message" \
+    '{code:$code,message:$message,segment_id:"segment-000001",
+      model_alias:"nemo:parakeet-tdt-v3"}')
+  event 4 session_warning 1.5 "$warning_json"
+  event 5 transcript_update 1.5 '{"segment_id":"segment-000001","track_id":"authoritative",
+    "revision":1,"state":"cascade_final","text":"first upstream",
+    "source_time":{"start_seconds":0,"end_seconds":1.5},
+    "model_alias":"nemo:nemotron-streaming-en","selection":"nemotron_fallback",
+    "supersedes":{"track_id":"nemotron","revision":2},
+    "words":[{"word":"first","start_seconds":0.1,"end_seconds":0.5}]}'
+  event 6 session_metrics 1.5 '{"model_load_counts":{"nemo:nemotron-streaming-en":1,
+    "nemo:parakeet-tdt-v3":1},"timing":{"inference_seconds":0.4,"pass_two_seconds":0.1},
+    "counts":{"segments":1,"provisional_updates":1,"parakeet_segments":0,
+    "nemotron_fallbacks":1,"silence_segments":0,"warnings":1}}'
+  event 7 session_completed 1.5 '{"text":"first upstream","segment_count":1}'
+  printf 'fake cascade diagnostic\nNATIVE_ASR_TIME\t0.20\t0.10\t9000\t0\n' >&2
+  exit 0
+fi
+
+event 4 transcript_update 1.5 '{"segment_id":"segment-000001","track_id":"authoritative",
+  "revision":1,"state":"cascade_final","text":"first accurate",
+  "source_time":{"start_seconds":0,"end_seconds":1.5},
+  "model_alias":"nemo:parakeet-tdt-v3","selection":"parakeet",
+  "supersedes":{"track_id":"nemotron","revision":2},
+  "words":[{"word":"first","start_seconds":0.2,"end_seconds":0.6}]}'
+event 5 transcript_update 2.2 '{"segment_id":"segment-000002","track_id":"nemotron",
+  "revision":1,"state":"provisional","text":"second draft",
+  "source_time":{"start_seconds":1.5,"end_seconds":2.2},
+  "model_alias":"nemo:nemotron-streaming-en"}'
+event 6 transcript_update 3.5 '{"segment_id":"segment-000002","track_id":"nemotron",
+  "revision":2,"state":"segment_final","text":"second upstream",
+  "source_time":{"start_seconds":1.5,"end_seconds":3.5},
+  "model_alias":"nemo:nemotron-streaming-en",
+  "words":[{"word":"second","start_seconds":1.7,"end_seconds":2.2}]}'
+event 7 transcript_update 3.5 '{"segment_id":"segment-000002","track_id":"authoritative",
+  "revision":1,"state":"cascade_final","text":"second accurate",
+  "source_time":{"start_seconds":1.5,"end_seconds":3.5},
+  "model_alias":"nemo:parakeet-tdt-v3","selection":"parakeet",
+  "supersedes":{"track_id":"nemotron","revision":2},
+  "words":[{"word":"second","start_seconds":1.7,"end_seconds":2.2}]}'
+event 8 session_metrics 3.5 '{"model_load_counts":{"nemo:nemotron-streaming-en":1,
+  "nemo:parakeet-tdt-v3":1},"timing":{"inference_seconds":0.8,"pass_two_seconds":0.2},
+  "counts":{"segments":2,"provisional_updates":2,"parakeet_segments":2,
+  "nemotron_fallbacks":0,"silence_segments":0,"warnings":0}}'
+event 9 session_completed 3.5 '{"text":"first accurate second accurate","segment_count":2}'
+printf 'fake cascade diagnostic\nNATIVE_ASR_TIME\t0.20\t0.10\t9000\t0\n' >&2
