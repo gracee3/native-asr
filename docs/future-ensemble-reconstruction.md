@@ -2,8 +2,9 @@
 
 The deterministic three-model, recorded-audio milestone is now implemented;
 see [`ensemble.md`](ensemble.md) for its command and audit contract. This
-document records the remaining direction for local-LLM-assisted reconstruction,
-concurrent scheduling, persistent workers, and streaming adaptation.
+document records the remaining direction beyond the implemented bounded,
+selection-only local-LLM adjudicator: concurrent scheduling, invented-text
+reconstruction, persistent ASR workers, and streaming adaptation.
 
 ## Objective and trust boundary
 
@@ -97,7 +98,7 @@ timestamps must still be preserved; hypotheses produced under materially
 different segmentation strategies should not be treated as directly aligned
 without an explicit reconciliation step.
 
-## Local LLM reconstruction
+## Local LLM reconstruction beyond bounded selection
 
 A modest quantized LLM can fit beside the current ASR models in 32 GiB, but it
 will compete for the same CPU execution and memory bandwidth. Exact footprint
@@ -119,7 +120,7 @@ until candidate text is available. Running full-speed LLM generation alongside
 full-speed ASR is not expected to improve aggregate throughput on this host.
 Pipelining can be evaluated later, but only after the sequential baseline.
 
-The LLM should receive short disagreement spans with limited surrounding
+The implemented opt-in adjudicator receives short disagreement spans with limited surrounding
 context and candidate provenance. Agreed text should bypass generation. This
 reduces prompt processing, generated tokens, context memory, latency, and the
 surface area for hallucination. Every LLM change should be attributable to a
@@ -153,13 +154,13 @@ can be validated.
 
 ## Implementation status and next posture
 
-The initial implementation now provides the first three items below. Remaining
+The initial implementation now provides the first four items below. Remaining
 work should continue to favor measurable correctness over concurrency:
 
 1. **Implemented:** preserve raw per-model outputs and provenance;
 2. **Implemented:** define truthful native timing spans and deterministic alignment;
 3. **Implemented:** consensus and disagreement localization without an LLM;
-4. add bounded local-LLM adjudication behind an optional flag;
+4. **Implemented:** bounded local-LLM token/deletion selection behind an optional flag;
 5. measure persistent model loads, sequential RTF, aggregate memory, and change
    provenance; and
 6. evaluate two-worker execution only after the sequential path is reproducible.

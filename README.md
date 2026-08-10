@@ -15,9 +15,10 @@ explicit host-side operation, model directories are mounted read-only at
 
 ## Status
 
-Four pinned native CPU runtimes, nine ASR aliases, locked public evaluation
-corpora, stateful streaming adapters, and reproducible WER/performance suites
-share one model-free, network-disabled container interface.
+Five pinned native CPU runtime images, nine ASR aliases, two opt-in local-LLM
+aliases, locked public evaluation corpora, stateful streaming adapters, and
+reproducible WER/performance suites share model-free, network-disabled
+container interfaces.
 
 The deterministic 100-utterance gate is complete for all nine aliases on both
 LibriSpeech splits: 18/18 runs completed with zero failures. A lower-commitment
@@ -202,6 +203,9 @@ just transcribe moonshine:small-streaming-en recording.m4a
 just build-whisper
 just models-whisper
 just transcribe whisper:small.en recording.m4a
+
+just build-llama
+just models-llm
 ```
 
 ## Common interface
@@ -231,7 +235,7 @@ Audio normalization uses a temporary 16 kHz mono PCM16 WAV and never modifies
 the original recording. `--language`, `--output`, `--vad`, and `--stream` are
 available through the script without expanding the simple Just recipe.
 
-## Deterministic three-model ensemble
+## Three-model ensemble with optional bounded adjudication
 
 Run the default English CPU ensemble sequentially and publish a private,
 provenance-complete audit directory:
@@ -249,6 +253,21 @@ digests, and adapter/Git fingerprints. Failed or cancelled started jobs retain
 their evidence but do not publish an authoritative transcript. See
 [`docs/ensemble.md`](docs/ensemble.md) for ordering overrides, exit statuses,
 alignment rules, timing semantics, and the complete artifact contract.
+
+Opt in to a local llama.cpp adjudicator with a third Just argument:
+
+```bash
+just ensemble recording.m4a recording.audit llm:ministral-3b-instruct-2512
+```
+
+The LLM can select only exact per-column ASR tokens or deletions, or abstain.
+Unanimous text bypasses it, every response is independently validated, and any
+bad span uses preserved deterministic consensus. Successful schema-2 bundles
+always include `transcript.txt`, `consensus.txt`, and `adjudication.json`.
+The repeated 2026-08-10 bake-off found both candidates deterministic but below
+the accuracy publication gate, so no long-form alias is currently recommended;
+see the
+[`blocked bake-off evidence`](benchmarks/published/2026-08-10-adjudication-bakeoff/README.md).
 
 ## Benchmarking
 
@@ -319,6 +338,8 @@ just versions
 | `nemo:parakeet-ctc-1.1b` | experimental batch-throughput model | Q8 GGUF |
 | `moonshine:small-streaming-en` | low-latency stateful English model | quantized multi-file ORT tree |
 | `whisper:small.en` | established English accuracy baseline | F16 GGML with Silero VAD |
+| `llm:ministral-3b-instruct-2512` | streaming-oriented bounded adjudicator candidate | Q5_K_M GGUF |
+| `llm:ministral-8b-instruct-2512` | offline-quality bounded adjudicator candidate | Q4_K_M GGUF |
 
 Every URL, upstream revision, digest, license identifier, quantization, and
 packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).

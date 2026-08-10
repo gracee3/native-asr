@@ -29,6 +29,11 @@ model bundles come from its long-lived `asr-models` release; their exact GitHub
 asset timestamps and SHA-256 digests are locked because that release tag is not
 an immutable content address.
 
+The two adjudication artifacts are official Apache-2.0 Mistral GGUFs: the 3B
+Instruct 2512 `Q5_K_M` at revision
+`eb599d408350ea2bb60452cb86be7c7b2fc28227`, and the 8B Instruct 2512
+`Q4_K_M` at revision `0102285ad796bd99af90f58de616092e5630e970`.
+
 `packaging` is `file`, `tar.bz2`, or `tree`. Multi-file trees have one locked
 row per component in `manifests/model-components.lock`, plus an aggregate digest
 over the installed per-file inventory. `requires` is a
@@ -67,9 +72,12 @@ models/
     ├── nemotron-3.5-streaming/*.gguf
 │   └── parakeet-ctc-1.1b/*.gguf
 ├── moonshine/small-streaming-en/*.ort
-└── whisper-cpp/
+├── whisper-cpp/
     ├── _shared/ggml-silero-v6.2.0.bin
     └── small.en/ggml-small.en.bin
+└── llama-cpp/
+    ├── ministral-3b-instruct-2512/*.gguf
+    └── ministral-8b-instruct-2512/*.gguf
 ```
 
 Do not move downloaded files into `docker/` or any other build-context path.

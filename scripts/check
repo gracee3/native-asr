@@ -43,6 +43,7 @@ python3 -m py_compile scripts/lib/*.py
 ./scripts/models list >/dev/null
 ./tests/sherpa-entrypoint-smoke
 ./tests/nemo-entrypoint-smoke
+./tests/llama-entrypoint-smoke
 ./tests/transcribe-smoke
 ./tests/ensemble-unit
 ./tests/ensemble-smoke

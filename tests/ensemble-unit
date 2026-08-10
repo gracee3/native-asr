@@ -4,7 +4,17 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
 PYTHONPATH="$repo_root/scripts/lib" python3 - <<'PY'
-from ensemble import add_native_timing, build_consensus, lexical_tokens
+import copy
+
+from adjudication_benchmark import summarize_model
+from ensemble import (
+    add_native_timing,
+    adjudication_prompt,
+    build_consensus,
+    lexical_tokens,
+    render_adjudicated,
+    validate_adjudication_choices,
+)
 
 
 def track(alias, text, result=None):
@@ -86,6 +96,97 @@ span = grouped["disagreements"][0]
 assert span["end_column_exclusive"] - span["start_column"] == 2
 assert span["context"] == {"before": "A", "after": "D E"}
 assert span["unresolved"]
+
+# Adjudication prompts carry exact candidates and accept only one bounded
+# decision per disagreement column.
+prompt = adjudication_prompt(fallback, fallback["disagreements"][0])
+assert prompt["input"]["context"] == {"before_tokens": ["A"], "after_tokens": ["C"]}
+assert prompt["input"]["columns"][0]["candidates"] == ["CAT", "DOG", "FOX"]
+response = {
+    "span_index": 0,
+    "decisions": [{"column_index": 1, "candidate_index": 1, "reason": "contextual_fit"}],
+}
+validated = validate_adjudication_choices(prompt, response)
+assert validated[0]["candidate"]["value"]["surface"] == "DOG"
+fallback_tracks = [track("primary", "A CAT C"), track("second", "A DOG C"),
+                   track("third", "A FOX C")]
+assert render_adjudicated(fallback, fallback_tracks, {1: 1}) == "A DOG C"
+
+# A track deletion is selectable; abstention preserves deterministic consensus.
+deletion_prompt = adjudication_prompt(inserted, inserted["disagreements"][0])
+deletion_response = {
+    "span_index": 0,
+    "decisions": [{"column_index": 1, "candidate_index": 0, "reason": "grammar"}],
+}
+validate_adjudication_choices(deletion_prompt, deletion_response)
+inserted_tracks = [track("primary", "A C"), track("second", "A B C"),
+                   track("third", "A B C")]
+assert render_adjudicated(inserted, inserted_tracks, {1: 0}) == "A C"
+abstain_response = {
+    "span_index": 0,
+    "decisions": [{"column_index": 1, "candidate_index": -1, "reason": "abstain"}],
+}
+validate_adjudication_choices(deletion_prompt, abstain_response)
+assert render_adjudicated(inserted, inserted_tracks, {1: -1}) == inserted["text"]
+
+# Choosing a normalized consensus supporter cannot replace its surface form.
+surface_tracks = [track("primary", "Hello, color."), track("second", "Hello, colour!"),
+                  track("third", "Hello, colour?")]
+surface_consensus = build_consensus(surface_tracks)
+assert render_adjudicated(surface_consensus, surface_tracks, {1: 2}) == "Hello, colour!"
+
+# Duplicate, missing, malformed, out-of-bounds, and inconsistent decisions fail closed.
+bad_responses = [
+    {"span_index": 0, "decisions": []},
+    {"span_index": 7, "decisions": response["decisions"]},
+    {"span_index": 0, "decisions": response["decisions"] * 2},
+    {"span_index": 0, "decisions": [{"column_index": 1, "candidate_index": 3,
+                                       "reason": "grammar"}]},
+    {"span_index": 0, "decisions": [{"column_index": 1, "candidate_index": -1,
+                                       "reason": "grammar"}]},
+    {"span_index": 0, "decisions": [{"column_index": 1, "candidate_index": 1,
+                                       "reason": "abstain"}]},
+]
+for bad in bad_responses:
+    try:
+        validate_adjudication_choices(prompt, bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"invalid adjudication was accepted: {bad}")
+
+# Benchmark summaries tolerate a missing forced-shutdown RSS sample and still
+# retain the available peak. Two missing samples remain explicitly unavailable.
+benchmark_repeat = {
+    "repeat": 1,
+    "provenance": {"artifact": {}, "container": {}, "runtime": {}, "policy": {}},
+    "scores": {
+        "librispeech-test-clean": {"errors": 37, "reference_words": 2084},
+        "librispeech-test-other": {"errors": 53, "reference_words": 1645},
+    },
+    "combined_errors": 90,
+    "decisions_sha256": "same",
+    "decisions": [{"timing": {"wall_seconds": 1.0}}],
+    "validated_spans": 138,
+    "fallback_spans": 3,
+    "execution": {
+        "load_seconds": 1.0,
+        "prompt_tokens": 10,
+        "generated_tokens": 10,
+        "prompt_seconds": 1.0,
+        "generation_seconds": 1.0,
+        "cpu_seconds": 4.0,
+        "peak_rss_kb": 1234,
+    },
+}
+benchmark_repeat_2 = copy.deepcopy(benchmark_repeat)
+benchmark_repeat_2["repeat"] = 2
+benchmark_repeat_2["execution"]["peak_rss_kb"] = None
+summary = summarize_model("test", [benchmark_repeat, benchmark_repeat_2])
+assert summary["qualifies"] and summary["metrics"]["peak_rss_kb"] == 1234
+benchmark_repeat["execution"]["peak_rss_kb"] = None
+summary = summarize_model("test", [benchmark_repeat, benchmark_repeat_2])
+assert summary["metrics"]["peak_rss_kb"] is None
 
 print("ensemble unit tests: ok")
 PY

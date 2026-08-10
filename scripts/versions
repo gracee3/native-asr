@@ -12,6 +12,7 @@ sherpa=$repo_root/docker/sherpa-onnx/Dockerfile
 nemo=$repo_root/docker/nemo-speech/Dockerfile
 moonshine=$repo_root/docker/moonshine/Dockerfile
 whisper=$repo_root/docker/whisper-cpp/Dockerfile
+llama=$repo_root/docker/llama-cpp/Dockerfile
 
 printf '%-18s %-12s %s\n' RUNTIME VERSION REVISION
 printf '%-18s %-12s %s\n' \
@@ -34,3 +35,6 @@ printf '%-18s %-12s %s\n' \
 printf '%-18s %-12s %s\n' \
   whisper.cpp "$(value "$whisper" WHISPER_CPP_VERSION)" \
   "$(value "$whisper" WHISPER_CPP_REVISION)"
+printf '%-18s %-12s %s\n' \
+  llama.cpp "$(value "$llama" LLAMA_CPP_VERSION)" \
+  "$(value "$llama" LLAMA_CPP_REVISION)"

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "Eight public LibriSpeech snapshot utterances concatenated in manifest order",
+  "expected_duration_seconds": 123.95,
+  "separator_silence_seconds": 0.0,
+  "reference_words": 293,
+  "samples": [
+    {"dataset": "librispeech-test-clean", "utterance_id": "8555-284447-0011"},
+    {"dataset": "librispeech-test-clean", "utterance_id": "7021-79759-0005"},
+    {"dataset": "librispeech-test-clean", "utterance_id": "8224-274384-0011"},
+    {"dataset": "librispeech-test-clean", "utterance_id": "2961-960-0000"},
+    {"dataset": "librispeech-test-clean", "utterance_id": "8224-274381-0009"},
+    {"dataset": "librispeech-test-other", "utterance_id": "6128-63241-0013"},
+    {"dataset": "librispeech-test-other", "utterance_id": "4294-35475-0012"},
+    {"dataset": "librispeech-test-other", "utterance_id": "3538-163619-0009"}
+  ]
+}

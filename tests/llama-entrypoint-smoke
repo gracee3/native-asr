@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-llama-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+mkdir -p "$work/bin"
+: > "$work/model.gguf"
+
+cat > "$work/llama-server" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${1:-} == --version ]]; then
+  printf '%s\n' 'fake llama.cpp b10333'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+EOF
+chmod +x "$work/llama-server"
+
+cat > "$work/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+if [[ $* == *'/health'* ]]; then
+  exit 0
+fi
+jq -cn --arg content '{"span_index":0,"decisions":[{"column_index":4,"candidate_index":-1,"reason":"abstain"}]}' '{
+  choices:[{message:{content:$content}}],
+  timings:{prompt_n:10,prompt_ms:20,predicted_n:8,predicted_ms:10}
+}'
+EOF
+chmod +x "$work/bin/curl"
+
+coproc WORKER {
+  PATH="$work/bin:$PATH" LLAMA_SERVER_BIN="$work/llama-server" \
+    "$repo_root/docker/llama-cpp/entrypoint.sh" serve \
+    --model "$work/model.gguf" --threads 4 --context 4096 --slots 1 \
+    2> "$work/stderr"
+}
+if ! read -r ready <&"${WORKER[0]}"; then
+  sed -n '1,120p' "$work/stderr" >&2
+  exit 1
+fi
+jq -e '.event == "ready" and .protocol_version == 1' <<< "$ready" >/dev/null
+
+request=$(jq -cn '{
+  command:"adjudicate",
+  request_id:"span-0",
+  max_tokens:128,
+  prompt:{
+    system:"bounded",
+    input:{span_index:0},
+    response_schema:{type:"object"}
+  }
+}')
+printf '%s\n' "$request" >&"${WORKER[1]}"
+read -r response <&"${WORKER[0]}"
+jq -e '.request_id == "span-0"
+  and (.response.choices[0].message.content | fromjson | .decisions[0].candidate_index) == -1' \
+  <<< "$response" >/dev/null
+printf '%s\n' '{"command":"shutdown"}' >&"${WORKER[1]}"
+set +e
+wait "$WORKER_PID"
+worker_status=$?
+set -e
+if ((worker_status != 0)); then
+  sed -n '1,120p' "$work/stderr" >&2
+  printf 'worker exited with status %s\n' "$worker_status" >&2
+  exit 1
+fi
+
+printf '%s\n' 'llama.cpp entrypoint smoke: ok'

@@ -1,80 +1,103 @@
-# Deterministic long-form ensemble
+# Long-form ensemble and bounded adjudication
 
-The first recorded-audio ensemble milestone is implemented as an English,
-CPU-only, offline command. It runs exactly three complete model transcriptions
-sequentially, aligns their lexical hypotheses, applies deterministic majority
-consensus, and atomically publishes an audit bundle.
+The recorded-audio ensemble is English, CPU-only, and offline. It runs exactly
+three complete model transcriptions sequentially, aligns their lexical
+hypotheses, applies deterministic majority consensus, and atomically publishes
+an audit bundle. An optional local LLM may select only existing ASR tokens or
+deletions inside disagreement spans. It is disabled unless an adjudicator alias
+is explicitly supplied.
 
 ## Command
 
-Use the reviewed default order:
+Use the reviewed default order without an LLM:
 
 ```bash
 ./scripts/ensemble --output transcript.audit recording.m4a
-# or
 just ensemble recording.m4a transcript.audit
 ```
 
-The default tracks are:
+The default tracks are `nemo:parakeet-tdt-v3` (alignment anchor and
+no-majority fallback), `sherpa:parakeet-unified-en`, and `whisper:small.en`.
+Override the order with exactly three distinct `--model ALIAS` arguments.
 
-1. `nemo:parakeet-tdt-v3`, the alignment anchor and no-majority fallback;
-2. `sherpa:parakeet-unified-en`; and
-3. `whisper:small.en`.
-
-Override the order by supplying exactly three distinct transcribable aliases:
+Enable bounded adjudication explicitly:
 
 ```bash
 ./scripts/ensemble --output transcript.audit \
-  --model whisper:small.en \
-  --model nemo:parakeet-tdt-v3 \
-  --model sherpa:parakeet-unified-en \
+  --adjudicator llm:ministral-3b-instruct-2512 \
+  --adjudication-timeout 30 \
   recording.m4a
+
+# The optional third Just argument has the same effect.
+just ensemble recording.m4a transcript.audit llm:ministral-3b-instruct-2512
 ```
 
-The first alias is always the anchor and fallback. All three models and their
-required artifacts are verified before inference begins. Runtime images are
-also inspected before the job boundary, and each runtime receives its validated
-thread default: four threads for the pinned NeMo graph and the online logical
-CPU count for Sherpa and Whisper. A runtime-managed model receives no synthetic
-thread setting.
+The timeout is per disagreement span and defaults to 30 seconds. Omitting
+`--adjudicator` always produces deterministic consensus, even when an LLM model
+is installed.
 
-`--output` is required and must name a path that does not exist. The command
-never overwrites or resumes an output path. On success it prints only the final
-text to stdout; progress and errors go to stderr. Exit statuses are `0` for
-success, `1` for a started job that failed, `2` for command or preflight
-validation, and `130` when a started job is cancelled.
+All configured artifacts are verified before inference. Runtime images are
+inspected and the ASR tracks receive their existing validated thread defaults.
+`--output` must name a path that does not exist and is never overwritten or
+resumed. Success prints only final text to stdout; progress and warnings go to
+stderr. Exit statuses are `0` for success, `1` for a started ASR/consensus job
+that failed, `2` for command or preflight validation, and `130` for explicit
+cancellation.
 
-## Consensus policy
+## Deterministic consensus
 
 Token extraction is identical to `english-upper-apostrophe-v1` normalization,
-while each token retains its source spelling, case, punctuation, and native
-timing provenance. The two secondary hypotheses are aligned independently to
-the first track using deterministic exact matching and local Levenshtein
-alignment. Insertions from both secondary tracks are then aligned to one
-another inside each anchor gap.
+while retaining source spelling, case, punctuation, and native timing. The two
+secondary hypotheses are aligned independently to the first track with exact
+matching and local Levenshtein alignment. Secondary insertions are aligned to
+one another inside each anchor gap.
 
-Every confusion-network column has three votes. A missing token is a deletion
-vote. Two equal tokens select that token; two deletions remove the column. A
-three-way disagreement selects the primary track's value, including a primary
-deletion, and is marked unresolved. The displayed spelling, case, and
-punctuation come from the first configured model that supports the selected
-normalized token.
+Every confusion-network column has three votes. A missing token is a deletion.
+Two equal values win; a three-way disagreement selects the primary track and is
+marked unresolved. Display spelling and punctuation come from the first model
+supporting the selected normalized token. Native timing is never interpolated:
+word timing stays word timing, segment timing stays explicitly coarse, and
+unmatched regions use `null`.
 
-Native timing is never interpolated. NeMo word spans remain word spans. Sherpa
-VAD spans and whisper.cpp transcription spans remain coarse segment spans and
-may be repeated on the lexical tokens they cover with `basis: "segment"`.
-Models or regions without a matching native span use `null`.
+## Bounded adjudication
+
+Unanimous columns bypass the LLM. Each request covers one consecutive
+non-unanimous span and contains five deterministic tokens of context on each
+side, all three alternatives, the deterministic selection, and the exact three
+candidate values for every column. Transcript fields are serialized as inert
+JSON data rather than interpolated into instructions.
+
+The response must contain one decision per column. `candidate_index` is `0`,
+`1`, or `2` to select that track's exact token or deletion, and `-1` to abstain.
+Reasons are restricted to `contextual_fit`, `grammar`, `orthography`,
+`named_entity`, `number`, or `abstain`. The host validates span/column
+identities, uniqueness, completeness, bounds, and abstention consistency after
+schema-constrained generation.
+
+One invalid decision rejects the entire span. A normalized choice equal to
+consensus retains the deterministic surface form; another choice uses the exact
+ASR token or deletion. The LLM cannot invent lexical material, alter unanimous
+text, or change punctuation through an equivalent normalized candidate.
+
+One pinned `llama-server` stays resident for an enabled job. It uses four CPU
+threads, a 4K context, one slot, greedy decoding, seed zero, and schema-
+constrained JSON. Its container has no network, capabilities, writable root,
+host audio mount, or model write access; only the selected model subtree is
+mounted read-only. No-disagreement jobs verify provenance without starting the
+worker.
 
 ## Audit bundle
 
-The command builds the following directory beside the requested destination,
-sets directory mode `0700` and file mode `0600`, and makes it visible with one
-no-replace rename:
+The command builds the following private directory beside the destination and
+publishes it with one no-replace rename. Directories are mode `0700`; files are
+mode `0600`.
 
 ```text
 transcript.audit/
 ├── result.json
 ├── transcript.txt
+├── consensus.txt
+├── adjudication.json
 ├── alignment.json
 ├── disagreements.json
 ├── tracks/
@@ -84,37 +107,45 @@ transcript.audit/
 └── logs/
     ├── 01-….stderr.log
     ├── 02-….stderr.log
-    └── 03-….stderr.log
+    ├── 03-….stderr.log
+    └── adjudicator.stderr.log  # only when configured
 ```
 
-`result.json` is the bundle index. It records status, authoritative text (or
-`null`), source path/digest/duration, ordered model and dependency artifacts,
-container image IDs, Git state, an adapter fingerprint, per-model execution
-data, aggregate timing, decision counts, and any failure.
+Schema-2 `result.json` is the bundle index. `text` is authoritative final text;
+`consensus_text` preserves deterministic consensus. Its `adjudication` summary
+records status, immutable model/runtime provenance, execution metrics, counts,
+and the detailed artifact reference. Existing track, alignment, and
+disagreement files remain schema 1 and retain their deterministic meaning.
 
-Each track JSON wraps the exact runtime result and adds only derived normalized
-tokens and their timing basis. `alignment.json` contains every confusion-network
-column, including null votes, token references, vote groups, chosen surface
-form, supporters, decision, and unresolved flag. `disagreements.json` groups
-consecutive non-unanimous columns and records all three alternatives, the
-selection, five-token context, and separate truthful time bounds for each
-track. Complete per-runtime stderr, including the in-container GNU time record,
-is retained under `logs/`.
+`adjudication.json` keeps every structured prompt, raw server response,
+validated choice, timing, and fallback reason. Its execution summary includes
+load and wall time, prompt/generated tokens and throughput, span p50/p95
+latency, CPU, exit status, and peak RSS. Status is one of `disabled`,
+`not_needed`, `complete`, `partial`, `fallback`, or `unavailable`.
 
-`transcript.txt` exists only for a successful three-model consensus. Once a job
-has started, a runtime error, malformed or empty hypothesis, missing timing or
-provenance artifact, internal consensus error, or cancellation still publishes
-the collected evidence with `status: "failed"` or `status: "cancelled"` and no
-authoritative transcript.
+Every successful bundle contains `transcript.txt`, `consensus.txt`, and
+`adjudication.json`. LLM startup failure, crash, malformed output, invalid
+choice, or timeout warns, preserves consensus for affected spans, and still
+exits zero. Explicit cancellation remains a cancelled job without an
+authoritative transcript. ASR, provenance, and consensus failures retain their
+existing failed-bundle behavior.
 
-## Current scope
+## Validation and remaining scope
 
-The committed 100-utterance snapshot gate runs the default order twice and
-requires identical hypotheses and no more errors than the best constituent on
-both LibriSpeech splits. The current implementation produces 37/2,084 errors on
-`test-clean` (best constituent: 42) and 54/1,645 on `test-other` (best
-constituent: 59).
+The deterministic 200-utterance regression remains unchanged when adjudication
+is disabled: 37/2,084 errors on `test-clean` and 54/1,645 on `test-other`.
+Candidate-selection oracle ceilings are 27 and 40 errors respectively. Real
+model bake-off evidence and a recommended long-form alias are published only
+after both repeated-decision and accuracy gates pass.
 
-Local-LLM adjudication, shared TUI progress events, concurrent inference
-profiles, incremental streaming consensus, persistent ensemble workers, and
-GPU scheduling remain later milestones.
+The 2026-08-10 bake-off produced identical decisions across repeats, but the 3B
+candidate scored 40/60 errors and the 8B candidate scored 45/57. Neither met
+the 37/54 split ceilings or strictly improved the combined 91-error baseline,
+so recommendation and production-path publication remain blocked. The complete
+evidence is in
+[`benchmarks/published/2026-08-10-adjudication-bakeoff`](../benchmarks/published/2026-08-10-adjudication-bakeoff/README.md).
+
+Continuous/provisional streaming adjudication, invented-text reconstruction,
+concurrent ASR scheduling, persistent ASR workers, and GPU scheduling remain
+deferred. The worker protocol is designed to be reused later only at finalized
+streaming segment boundaries.

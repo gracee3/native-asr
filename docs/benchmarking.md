@@ -87,6 +87,30 @@ peak RSS, RTF, failures, and event-order validation. Paced runs report partial
 and finalization lag; unpaced AMI runs leave those latency fields null rather
 than subtracting media time from throughput time.
 
+## Adjudicator bake-off
+
+`scripts/adjudication-benchmark --output RESULT.json` replays the three locked
+ASR hypotheses for all 200 utterances in the committed snapshot. It starts one
+persistent worker per adjudicator/repeat, validates all 141 disagreement spans
+and 244 non-unanimous columns, and runs both Ministral candidates twice. The
+result retains every validated decision or fallback plus per-split errors, load time,
+prompt/generation throughput, span p50/p95 latency, CPU, and peak RSS.
+
+Repeated decision digests must match. A candidate must be no worse than 37
+`test-clean` errors and 54 `test-other` errors, and must strictly improve the
+combined 91-error baseline. Ranking is combined errors, then p95 latency, then
+peak RSS. The runner exits nonzero and records a blocked recommendation when no
+candidate qualifies. Selection-only oracle ceilings are 27 and 40 errors.
+
+Long CPU runs may be resumed with `--reuse-model-result PREVIOUS.json`. Reuse
+is accepted only when the snapshot hash and shape, repeat count, model digest,
+and llama.cpp revision match; scores, metrics, decision digests, qualification,
+and cross-model ranking are recomputed from the embedded repeat records.
+
+`just ensemble-fixture OUTPUT_DIR` recreates the locked eight-sample public
+long-form fixture from prepared dataset manifests. It verifies the exact
+123.950-second duration and 293-word reference before publication.
+
 The latest engineering, deterministic subset, and initial full-split
 validation, plus the boundary between completed and pending stages, are in
 [`reproducibility-report.md`](reproducibility-report.md).
@@ -96,5 +120,10 @@ versioned in
 [`benchmarks/published/2026-08-09-librispeech-100`](../benchmarks/published/2026-08-09-librispeech-100/README.md).
 The initial two-model full `test-clean` records are versioned separately in
 [`benchmarks/published/2026-08-09-librispeech-test-clean-pair`](../benchmarks/published/2026-08-09-librispeech-test-clean-pair/README.md).
+The repeated bounded-adjudicator bake-off is in
+[`benchmarks/published/2026-08-10-adjudication-bakeoff`](../benchmarks/published/2026-08-10-adjudication-bakeoff/README.md).
+Both candidates were deterministic but failed the accuracy gates, so the
+snapshot records a blocked recommendation and no recommended-profile
+long-form result.
 Generated ledgers remain external by default; only reviewed snapshots derived
 from public evaluation corpora belong in that directory.

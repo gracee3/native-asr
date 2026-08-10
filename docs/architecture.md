@@ -37,6 +37,7 @@ the override mechanism. Docker's global data root is intentionally unchanged.
 | `asr-nemo-speech` | NVIDIA NeMo-Speech.cpp + ggml | 2 |
 | `asr-moonshine` | Moonshine native C++ runtime | 3 |
 | `asr-whisper-cpp` | ggml-org/whisper.cpp | 3 |
+| `asr-llama-cpp` | ggml-org/llama.cpp | opt-in adjudication |
 
 The Sherpa image links its selected native executables to the pinned shared
 ONNX Runtime library. This avoids a verified allocator failure seen with the
@@ -58,6 +59,12 @@ v0.1.1 Linux library release, whose SHA-256 and source revision are pinned. The
 adapter keeps one transcriber alive across batch streams and emits native
 partial/final events. The whisper.cpp image builds `whisper-cli` from v1.9.2
 with GPU backends and host-native code generation disabled.
+
+The llama.cpp image builds only the pinned `b10333` server path needed for
+CPU-only structured generation. It is model-free and Python-free. The ensemble
+starts one loopback-only server in a network-disabled, read-only container with
+four threads, a 4K context, and one slot. Only the selected model tree is
+mounted; audio is never exposed to the adjudicator container.
 
 The default builds target portable modern x86-64 CPUs. They do not use
 `-march=native`. A separately named host-native profile can be added only after
@@ -88,4 +95,7 @@ three configured models before starting, then invokes one complete measured
 `scripts/transcribe --format json` process group per model, sequentially. The
 host-only standard-library consensus layer preserves the three native results,
 aligns normalized lexical tokens to the first track, and publishes the audit
-directory atomically. It does not place Python or model data in a runtime image.
+directory atomically. Optional adjudication passes JSONL over stdin/stdout to a
+persistent llama.cpp container, externally validates every bounded candidate
+choice, and falls back per span. It does not place Python or model data in a
+runtime image.

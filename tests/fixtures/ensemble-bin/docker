@@ -5,6 +5,10 @@ if [[ -n ${NATIVE_ASR_TEST_DOCKER_LOG:-} ]]; then
   printf '%s\n' "$*" >> "$NATIVE_ASR_TEST_DOCKER_LOG"
 fi
 if [[ ${1:-} == image && ${2:-} == inspect ]]; then
+  if [[ ${NATIVE_ASR_TEST_INSPECT_FAIL_IMAGE:-} == "${3:-}" ]]; then
+    printf 'fake diagnostic: image missing: %s\n' "$3" >&2
+    exit 1
+  fi
   printf 'sha256:test-%s\n' "${3//[^A-Za-z0-9]/-}"
   exit 0
 fi
@@ -12,12 +16,72 @@ fi
 image=''
 for argument in "$@"; do
   case $argument in
-    asr-nemo-speech|asr-sherpa-onnx|asr-whisper-cpp|asr-moonshine)
+    asr-nemo-speech|asr-sherpa-onnx|asr-whisper-cpp|asr-moonshine|asr-llama-cpp)
       image=$argument
       ;;
   esac
 done
 [[ -n $image ]]
+
+if [[ $image == asr-llama-cpp ]]; then
+  mode=${NATIVE_ASR_TEST_ADJUDICATOR_MODE:-select}
+  if [[ $mode == startup-failure ]]; then
+    printf 'fake diagnostic: adjudicator startup failure\n' >&2
+    printf 'NATIVE_ASR_TIME\t0.20\t0.10\t6000\t8\n' >&2
+    exit 8
+  fi
+  jq -cn '{event:"ready",protocol_version:1,load_seconds:0.25}'
+  while IFS= read -r request; do
+    command=$(jq -r '.command' <<< "$request")
+    [[ $command != shutdown ]] || break
+    request_id=$(jq -r '.request_id' <<< "$request")
+    if [[ $mode == timeout ]]; then
+      [[ -z ${NATIVE_ASR_TEST_STARTED:-} ]] || : > "$NATIVE_ASR_TEST_STARTED"
+      sleep "${NATIVE_ASR_TEST_DELAY_SECONDS:-30}"
+    elif [[ $mode == crash ]]; then
+      printf 'fake diagnostic: adjudicator crashed\n' >&2
+      exit 9
+    elif [[ $mode == malformed ]]; then
+      printf '%s\n' 'not-json'
+      continue
+    fi
+
+    content=$(jq -c --arg mode "$mode" \
+      --argjson selected "${NATIVE_ASR_TEST_ADJUDICATOR_INDEX:-1}" '
+      .prompt.input as $input |
+      if $mode == "malformed-content" then "not-json"
+      elif $mode == "missing" or ($mode == "partial" and $input.span_index > 0) then
+        {span_index:$input.span_index,decisions:[]}
+      elif $mode == "duplicate" then
+        ($input.columns[0] | {column_index,candidate_index:$selected,reason:"grammar"}) as $choice |
+        {span_index:$input.span_index,decisions:[$choice,$choice]}
+      elif $mode == "invalid-index" then
+        {span_index:$input.span_index,decisions:[
+          $input.columns[] | {column_index,candidate_index:7,reason:"grammar"}
+        ]}
+      elif $mode == "abstain" then
+        {span_index:$input.span_index,decisions:[
+          $input.columns[] | {column_index,candidate_index:-1,reason:"abstain"}
+        ]}
+      else
+        {span_index:$input.span_index,decisions:[
+          $input.columns[] | {column_index,candidate_index:$selected,reason:"grammar"}
+        ]}
+      end
+    ' <<< "$request")
+    jq -cn --arg request_id "$request_id" --arg content "$content" '{
+      request_id:$request_id,
+      response:{
+        choices:[{message:{content:$content}}],
+        timings:{prompt_n:100,prompt_ms:200,prompt_per_second:500,
+          predicted_n:20,predicted_ms:100,predicted_per_second:200}
+      }
+    }'
+  done
+  printf 'fake diagnostic: adjudicator completed\n' >&2
+  printf 'NATIVE_ASR_TIME\t0.30\t0.10\t6000\t0\n' >&2
+  exit 0
+fi
 
 if [[ ${NATIVE_ASR_TEST_DELAY_IMAGE:-} == "$image" ]]; then
   : > "${NATIVE_ASR_TEST_STARTED:?}"
@@ -31,6 +95,28 @@ fi
 if [[ ${NATIVE_ASR_TEST_EMPTY_IMAGE:-} == "$image" ]]; then
   jq -cn '{runtime:"fake-runtime",segmentation:"none",text:""}'
   printf 'fake diagnostic: empty hypothesis for %s\n' "$image" >&2
+  printf 'NATIVE_ASR_TIME\t0.20\t0.10\t5000\t0\n' >&2
+  exit 0
+fi
+
+if [[ ${NATIVE_ASR_TEST_UNANIMOUS:-0} == 1 ]]; then
+  jq -cn --arg runtime "$image" \
+    '{runtime:$runtime,segmentation:"none",text:"Hello world."}'
+  printf 'fake diagnostic: completed %s\n' "$image" >&2
+  printf 'NATIVE_ASR_TIME\t0.20\t0.10\t5000\t0\n' >&2
+  exit 0
+fi
+
+if [[ ${NATIVE_ASR_TEST_TWO_SPANS:-0} == 1 ]]; then
+  case $image in
+    asr-nemo-speech) text='A CAT X RED Z' ;;
+    asr-sherpa-onnx) text='A DOG X BLUE Z' ;;
+    asr-whisper-cpp) text='A FOX X GREEN Z' ;;
+    *) exit 9 ;;
+  esac
+  jq -cn --arg runtime "$image" --arg text "$text" \
+    '{runtime:$runtime,segmentation:"none",text:$text}'
+  printf 'fake diagnostic: completed %s\n' "$image" >&2
   printf 'NATIVE_ASR_TIME\t0.20\t0.10\t5000\t0\n' >&2
   exit 0
 fi

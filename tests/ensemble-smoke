@@ -7,15 +7,18 @@ trap 'rm -rf -- "$work"' EXIT
 
 models=$work/models
 manifest=$work/models.lock
-mkdir -p "$models/nemo-speech" "$models/sherpa-onnx" "$models/whisper-cpp"
+mkdir -p "$models/nemo-speech" "$models/sherpa-onnx" "$models/whisper-cpp" \
+  "$models/llama-cpp/ministral-3b-instruct-2512"
 : > "$models/nemo-speech/model.gguf"
 : > "$models/sherpa-onnx/model.onnx"
 : > "$models/whisper-cpp/model.bin"
+: > "$models/llama-cpp/ministral-3b-instruct-2512/model.gguf"
 : > "$work/input.wav"
 cat > "$manifest" <<'EOF'
 nemo-test|nemo:parakeet-tdt-v3|nemo-speech|Test NeMo|https://invalid.example/nemo|test-nemo|model.gguf|nemo-speech/model.gguf|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|CC-BY-4.0|file||test
 sherpa-test|sherpa:parakeet-unified-en|sherpa-onnx|Test Sherpa|https://invalid.example/sherpa|test-sherpa|model.onnx|sherpa-onnx/model.onnx|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|CC-BY-4.0|file||test
 whisper-test|whisper:small.en|whisper-cpp|Test Whisper|https://invalid.example/whisper|test-whisper|model.bin|whisper-cpp/model.bin|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|MIT|file||test
+llama-test|llm:ministral-3b-instruct-2512|llama-cpp|Test LLM|https://invalid.example/llm|test-llm|model.gguf|llama-cpp/ministral-3b-instruct-2512/model.gguf|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|Apache-2.0|file||test
 EOF
 
 export PATH="$repo_root/tests/fixtures/ensemble-bin:$PATH"
@@ -28,8 +31,11 @@ bundle=$work/default-bundle
 stdout=$("$repo_root/scripts/ensemble" --output "$bundle" "$work/input.wav" 2> "$work/default.stderr")
 [[ $stdout == 'Hello, brave world.' ]]
 jq -e '
-  .status == "complete"
+  .schema_version == 2
+  and .status == "complete"
   and .text == "Hello, brave world."
+  and .consensus_text == .text
+  and .adjudication.status == "disabled"
   and [.models[].alias] == ["nemo:parakeet-tdt-v3","sherpa:parakeet-unified-en","whisper:small.en"]
   and .models[0].anchor
   and (.models | all(.status == "complete"))
@@ -39,6 +45,9 @@ jq -e '
   and .decision_counts.majority_token == 1
 ' "$bundle/result.json" >/dev/null
 [[ $(< "$bundle/transcript.txt") == 'Hello, brave world.' ]]
+[[ $(< "$bundle/consensus.txt") == 'Hello, brave world.' ]]
+jq -e '.status == "disabled" and .model == null and (.spans | length == 0)' \
+  "$bundle/adjudication.json" >/dev/null
 jq -e '.status == "complete" and (.columns | length == 3)' "$bundle/alignment.json" >/dev/null
 jq -e '.status == "complete" and (.spans | length == 1)' "$bundle/disagreements.json" >/dev/null
 for track in "$bundle"/tracks/*.json; do
@@ -70,6 +79,126 @@ ordered_stdout=$("$repo_root/scripts/ensemble" --output "$ordered" \
 [[ $ordered_stdout == 'Hello, brave world!' ]]
 jq -e '.models[0].alias == "whisper:small.en" and .models[0].anchor
   and .models[1].alias == "nemo:parakeet-tdt-v3"' "$ordered/result.json" >/dev/null
+
+# A valid bounded deletion becomes authoritative while consensus is preserved.
+adjudicated=$work/adjudicated-bundle
+adjudicated_stdout=$("$repo_root/scripts/ensemble" --output "$adjudicated" \
+  --adjudicator llm:ministral-3b-instruct-2512 "$work/input.wav" \
+  2> "$work/adjudicated.stderr")
+[[ $adjudicated_stdout == 'Hello, world.' ]]
+[[ $(< "$adjudicated/transcript.txt") == 'Hello, world.' ]]
+[[ $(< "$adjudicated/consensus.txt") == 'Hello, brave world.' ]]
+jq -e '
+  .status == "complete"
+  and .text == "Hello, world."
+  and .consensus_text == "Hello, brave world."
+  and .adjudication.status == "complete"
+  and .adjudication.counts.applied == 1
+  and .adjudication.execution.load_seconds == 0.25
+  and .artifacts.adjudication == "adjudication.json"
+  and .artifacts.consensus == "consensus.txt"
+' "$adjudicated/result.json" >/dev/null
+jq -e '
+  .status == "complete"
+  and .model.alias == "llm:ministral-3b-instruct-2512"
+  and .runtime.revision == "08659901c43b51de735740f1cf61bb82fbe0c4e4"
+  and .runtime.policy.network == "none"
+  and (.spans[0].prompt.input.columns[0].candidates | length == 3)
+  and .spans[0].validated_choices[0].candidate.value == null
+  and .execution.peak_rss_kb == 6000
+' "$adjudicated/adjudication.json" >/dev/null
+grep -Fq -- '--network none' "$NATIVE_ASR_TEST_DOCKER_LOG"
+grep -Fq -- '--read-only' "$NATIVE_ASR_TEST_DOCKER_LOG"
+grep -Fq -- '--interactive' "$NATIVE_ASR_TEST_DOCKER_LOG"
+grep -Fq -- '--user ' "$NATIVE_ASR_TEST_DOCKER_LOG"
+grep -Fq -- '--cap-drop ALL' "$NATIVE_ASR_TEST_DOCKER_LOG"
+grep -Fq -- '--security-opt no-new-privileges' "$NATIVE_ASR_TEST_DOCKER_LOG"
+grep -Fq -- '--tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m' \
+  "$NATIVE_ASR_TEST_DOCKER_LOG"
+grep -Fq -- "source=$models/llama-cpp/ministral-3b-instruct-2512,target=/models,readonly" \
+  "$NATIVE_ASR_TEST_DOCKER_LOG"
+if grep 'asr-llama-cpp' "$NATIVE_ASR_TEST_DOCKER_LOG" | \
+    grep -Fq "source=$models/llama-cpp,target=/models"; then
+  printf '%s\n' 'adjudicator unexpectedly received the complete LLM model root' >&2
+  exit 1
+fi
+if grep 'asr-llama-cpp' "$NATIVE_ASR_TEST_DOCKER_LOG" | grep -Fq '/audio'; then
+  printf '%s\n' 'adjudicator unexpectedly received an audio mount' >&2
+  exit 1
+fi
+
+# Abstention is valid and leaves the deterministic result byte-for-byte intact.
+abstained=$work/abstained-bundle
+export NATIVE_ASR_TEST_ADJUDICATOR_MODE=abstain
+"$repo_root/scripts/ensemble" --output "$abstained" \
+  --adjudicator llm:ministral-3b-instruct-2512 "$work/input.wav" \
+  > "$work/abstained.stdout" 2> "$work/abstained.stderr"
+unset NATIVE_ASR_TEST_ADJUDICATOR_MODE
+jq -e '.text == .consensus_text and .adjudication.status == "complete"
+  and .adjudication.counts.abstained == 1' "$abstained/result.json" >/dev/null
+
+# Every malformed response shape falls back atomically and still exits zero.
+for mode in malformed malformed-content duplicate missing invalid-index; do
+  fallback_bundle=$work/fallback-$mode
+  export NATIVE_ASR_TEST_ADJUDICATOR_MODE=$mode
+  "$repo_root/scripts/ensemble" --output "$fallback_bundle" \
+    --adjudicator llm:ministral-3b-instruct-2512 "$work/input.wav" \
+    > "$work/fallback-$mode.stdout" 2> "$work/fallback-$mode.stderr"
+  jq -e '.status == "complete" and .text == .consensus_text
+    and .adjudication.status == "fallback"
+    and .adjudication.counts.fallback == 1' "$fallback_bundle/result.json" >/dev/null
+  grep -Fq 'warning: adjudication fallback' "$work/fallback-$mode.stderr"
+done
+unset NATIVE_ASR_TEST_ADJUDICATOR_MODE
+
+# Valid earlier spans survive a later invalid response; the bad span is consensus.
+partial=$work/partial-bundle
+export NATIVE_ASR_TEST_TWO_SPANS=1 NATIVE_ASR_TEST_ADJUDICATOR_MODE=partial
+partial_stdout=$("$repo_root/scripts/ensemble" --output "$partial" \
+  --adjudicator llm:ministral-3b-instruct-2512 "$work/input.wav" \
+  2> "$work/partial.stderr")
+unset NATIVE_ASR_TEST_TWO_SPANS NATIVE_ASR_TEST_ADJUDICATOR_MODE
+[[ $partial_stdout == 'A DOG X RED Z' ]]
+jq -e '.adjudication.status == "partial"
+  and .adjudication.counts.spans_validated == 1
+  and .adjudication.counts.spans_fallback == 1' "$partial/result.json" >/dev/null
+
+# Timeout, worker crash, startup failure, and unavailable image all preserve consensus.
+for mode in timeout crash startup-failure; do
+  fallback_bundle=$work/runtime-$mode
+  export NATIVE_ASR_TEST_ADJUDICATOR_MODE=$mode
+  if [[ $mode == timeout ]]; then
+    timeout_args=(--adjudication-timeout 0.05)
+  else
+    timeout_args=()
+  fi
+  "$repo_root/scripts/ensemble" --output "$fallback_bundle" \
+    --adjudicator llm:ministral-3b-instruct-2512 "${timeout_args[@]}" "$work/input.wav" \
+    > "$work/runtime-$mode.stdout" 2> "$work/runtime-$mode.stderr"
+  jq -e '.status == "complete" and .text == .consensus_text
+    and .adjudication.status == "fallback"' "$fallback_bundle/result.json" >/dev/null
+done
+unset NATIVE_ASR_TEST_ADJUDICATOR_MODE
+
+unavailable=$work/unavailable-bundle
+export NATIVE_ASR_TEST_INSPECT_FAIL_IMAGE=asr-llama-cpp
+"$repo_root/scripts/ensemble" --output "$unavailable" \
+  --adjudicator llm:ministral-3b-instruct-2512 "$work/input.wav" \
+  > "$work/unavailable.stdout" 2> "$work/unavailable.stderr"
+unset NATIVE_ASR_TEST_INSPECT_FAIL_IMAGE
+jq -e '.status == "complete" and .text == .consensus_text
+  and .adjudication.status == "unavailable"' "$unavailable/result.json" >/dev/null
+
+# Provenance is verified, but a no-disagreement job never starts the worker.
+not_needed=$work/not-needed-bundle
+export NATIVE_ASR_TEST_UNANIMOUS=1 NATIVE_ASR_TEST_ADJUDICATOR_MODE=startup-failure
+"$repo_root/scripts/ensemble" --output "$not_needed" \
+  --adjudicator llm:ministral-3b-instruct-2512 "$work/input.wav" \
+  > "$work/not-needed.stdout" 2> "$work/not-needed.stderr"
+unset NATIVE_ASR_TEST_UNANIMOUS NATIVE_ASR_TEST_ADJUDICATOR_MODE
+jq -e '.status == "complete" and .adjudication.status == "not_needed"
+  and .adjudication.model.artifact.sha256 == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"' \
+  "$not_needed/result.json" >/dev/null
 
 # A started runtime failure publishes evidence but no authoritative transcript.
 failed=$work/failed-bundle
@@ -130,8 +259,56 @@ unset NATIVE_ASR_TEST_DELAY_IMAGE NATIVE_ASR_TEST_DELAY_SECONDS NATIVE_ASR_TEST_
 jq -e '.status == "cancelled" and .models[0].status == "complete"
   and .models[1].status == "cancelled"' "$cancelled/result.json" >/dev/null
 
+# Cancellation while the LLM is active remains a cancelled job, never fallback success.
+adjudication_cancelled=$work/adjudication-cancelled-bundle
+export NATIVE_ASR_TEST_ADJUDICATOR_MODE=timeout
+export NATIVE_ASR_TEST_DELAY_SECONDS=30
+export NATIVE_ASR_TEST_STARTED=$work/adjudication-cancelled.started
+"$repo_root/scripts/ensemble" --output "$adjudication_cancelled" \
+  --adjudicator llm:ministral-3b-instruct-2512 --adjudication-timeout 60 \
+  "$work/input.wav" > "$work/adjudication-cancelled.stdout" \
+  2> "$work/adjudication-cancelled.stderr" &
+adjudication_cancelled_pid=$!
+for _ in $(seq 1 200); do [[ -e $NATIVE_ASR_TEST_STARTED ]] && break; sleep 0.02; done
+[[ -e $NATIVE_ASR_TEST_STARTED ]]
+kill -TERM "$adjudication_cancelled_pid"
+set +e
+wait "$adjudication_cancelled_pid"
+adjudication_cancelled_status=$?
+set -e
+unset NATIVE_ASR_TEST_ADJUDICATOR_MODE NATIVE_ASR_TEST_DELAY_SECONDS NATIVE_ASR_TEST_STARTED
+[[ $adjudication_cancelled_status == 130 && -d $adjudication_cancelled \
+  && ! -e $adjudication_cancelled/transcript.txt ]]
+jq -e '.status == "cancelled" and .failure.stage == "adjudication"
+  and .consensus_text == "Hello, brave world."
+  and (.adjudication.status == "fallback" or .adjudication.status == "partial")' \
+  "$adjudication_cancelled/result.json" >/dev/null
+
+# The repeated snapshot runner uses the same persistent protocol and records
+# deterministic validated choices even when a fake candidate misses the gate.
+benchmark_result=$work/adjudication-benchmark.json
+set +e
+"$repo_root/scripts/adjudication-benchmark" --output "$benchmark_result" \
+  --adjudicator llm:ministral-3b-instruct-2512 --repeats 2 --timeout 1 \
+  > "$work/adjudication-benchmark.stdout" 2> "$work/adjudication-benchmark.stderr"
+benchmark_status=$?
+set -e
+((benchmark_status == 0 || benchmark_status == 1))
+jq -e '
+  .snapshot.utterances == 200
+  and .snapshot.spans == 141
+  and .snapshot.non_unanimous_columns == 244
+  and (.models | length == 1)
+  and .models[0].identical_validated_decisions
+  and .models[0].validated_spans == [141,141]
+  and .models[0].fallback_spans == [0,0]
+  and (.models[0].repeats | length == 2)
+' "$benchmark_result" >/dev/null
+
 # The bundle stays private after atomic rename.
 while IFS= read -r mode; do [[ $mode == 700 ]]; done < <(find "$bundle" -type d -printf '%m\n')
 while IFS= read -r mode; do [[ $mode == 600 ]]; done < <(find "$bundle" -type f -printf '%m\n')
+while IFS= read -r mode; do [[ $mode == 700 ]]; done < <(find "$adjudicated" -type d -printf '%m\n')
+while IFS= read -r mode; do [[ $mode == 600 ]]; done < <(find "$adjudicated" -type f -printf '%m\n')
 
 printf '%s\n' 'ensemble integration smoke: ok'

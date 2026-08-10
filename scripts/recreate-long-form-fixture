@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/lib/paths.sh"
+fixture=$NATIVE_ASR_REPO_ROOT/tests/fixtures/ensemble-long-form-8.json
+manifests_root=$NATIVE_ASR_DATASETS/manifests
+
+die() { printf 'error: %s\n' "$*" >&2; exit 2; }
+[[ $# == 1 ]] || die 'usage: scripts/recreate-long-form-fixture OUTPUT_DIR'
+output=$(realpath -m -- "$1")
+[[ ! -e $output && ! -L $output ]] || die "output already exists: $output"
+output_parent=$(dirname -- "$output")
+[[ -d $output_parent ]] || die "output parent is not a directory: $output_parent"
+for command in jq ffmpeg ffprobe; do
+  command -v "$command" >/dev/null 2>&1 || die "required command is unavailable: $command"
+done
+
+stage=$(mktemp -d "$output_parent/.$(basename -- "$output").native-asr.XXXXXX")
+trap 'rm -rf -- "$stage"' EXIT
+chmod 700 "$stage"
+: > "$stage/concat.txt"
+: > "$stage/reference.txt"
+chmod 600 "$stage/concat.txt" "$stage/reference.txt"
+
+separator_seconds=$(jq -er '.separator_silence_seconds' "$fixture")
+if awk -v seconds="$separator_seconds" 'BEGIN { exit !(seconds > 0) }'; then
+  ffmpeg -nostdin -hide_banner -loglevel error -f lavfi \
+    -i 'anullsrc=r=16000:cl=mono' -t "$separator_seconds" \
+    -c:a pcm_s16le "$stage/silence.wav"
+  chmod 600 "$stage/silence.wav"
+fi
+sample_count=$(jq '.samples | length' "$fixture")
+sample_number=0
+
+while IFS=$'\t' read -r dataset utterance_id; do
+  ((sample_number += 1))
+  manifest=$manifests_root/$dataset.jsonl
+  [[ -r $manifest ]] || die "prepared dataset manifest is unavailable: $manifest"
+  row=$(jq -cer --arg id "$utterance_id" 'select(.utterance_id == $id)' "$manifest") || \
+    die "fixture utterance is missing from $manifest: $utterance_id"
+  prepared=$(jq -er '.prepared_path' <<< "$row")
+  reference=$(jq -er '.reference' <<< "$row")
+  [[ -r $prepared ]] || die "prepared fixture audio is unavailable: $prepared"
+  [[ $prepared != *"'"* ]] || die "fixture path contains an unsupported quote: $prepared"
+  printf "file '%s'\n" "$prepared" >> "$stage/concat.txt"
+  if ((sample_number < sample_count)) && [[ -e $stage/silence.wav ]]; then
+    printf "file '%s'\n" "$stage/silence.wav" >> "$stage/concat.txt"
+  fi
+  printf '%s ' "$reference" >> "$stage/reference.txt"
+done < <(jq -r '.samples[] | [.dataset,.utterance_id] | @tsv' "$fixture")
+sed -i 's/[[:space:]]*$//' "$stage/reference.txt"
+
+ffmpeg -nostdin -hide_banner -loglevel error -f concat -safe 0 \
+  -i "$stage/concat.txt" -map_metadata -1 -vn -sn -dn -ar 16000 -ac 1 \
+  -c:a pcm_s16le "$stage/audio.wav"
+chmod 600 "$stage/audio.wav"
+install -m 0600 "$fixture" "$stage/fixture.json"
+
+duration=$(ffprobe -v error -show_entries format=duration \
+  -of default=noprint_wrappers=1:nokey=1 "$stage/audio.wav")
+expected_duration=$(jq -r '.expected_duration_seconds' "$fixture")
+awk -v actual="$duration" -v expected="$expected_duration" \
+  'BEGIN { delta=actual-expected; if (delta<0) delta=-delta; exit !(delta <= 0.001) }' || \
+  die "fixture duration mismatch: expected $expected_duration, got $duration"
+words=$(wc -w < "$stage/reference.txt")
+expected_words=$(jq -r '.reference_words' "$fixture")
+[[ $words == "$expected_words" ]] || \
+  die "fixture word-count mismatch: expected $expected_words, got $words"
+rm "$stage/concat.txt"
+[[ ! -e $stage/silence.wav ]] || rm "$stage/silence.wav"
+mv -- "$stage" "$output"
+trap - EXIT
+printf '%s\n' "$output"

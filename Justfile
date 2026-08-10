@@ -19,8 +19,12 @@ build-moonshine:
 build-whisper:
     docker build --file docker/whisper-cpp/Dockerfile --tag asr-whisper-cpp .
 
+# Build the pinned llama.cpp CPU adjudicator runtime image.
+build-llama:
+    docker build --file docker/llama-cpp/Dockerfile --tag asr-llama-cpp .
+
 # Build every currently implemented runtime image.
-build: build-sherpa build-nemo build-moonshine build-whisper
+build: build-sherpa build-nemo build-moonshine build-whisper build-llama
 
 # Run host-side syntax, manifest, policy, and wrapper smoke tests.
 check:
@@ -48,6 +52,9 @@ models-moonshine:
 models-whisper:
     @./scripts/models fetch --runtime whisper-cpp
 
+models-llm:
+    @./scripts/models fetch --runtime llama-cpp
+
 # Download one runtime-qualified model alias.
 model alias:
     @./scripts/models fetch {{ quote(alias) }}
@@ -60,9 +67,17 @@ verify-models alias="":
 transcribe alias audio:
     @./scripts/transcribe {{ quote(alias) }} {{ quote(audio) }}
 
-# Run the deterministic three-model long-form ensemble and publish an audit bundle.
-ensemble audio output:
-    @./scripts/ensemble --output {{ quote(output) }} {{ quote(audio) }}
+# Run the three-model long-form ensemble; the optional LLM remains explicitly opt-in.
+ensemble audio output adjudicator="":
+    @./scripts/ensemble --output {{ quote(output) }} {{ if adjudicator == "" { "" } else { "--adjudicator " + quote(adjudicator) } }} {{ quote(audio) }}
+
+# Recreate the locked 123.95-second public long-form fixture.
+ensemble-fixture output:
+    @./scripts/recreate-long-form-fixture {{ quote(output) }}
+
+# Run both local-LLM candidates twice over the committed 200-utterance snapshot.
+adjudication-benchmark output:
+    @./scripts/adjudication-benchmark --output {{ quote(output) }}
 
 # Benchmark one model/audio pair and append a provenance-rich JSONL record.
 bench alias audio:
