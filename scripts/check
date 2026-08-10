@@ -46,6 +46,8 @@ python3 -m py_compile scripts/lib/*.py
 ./tests/transcribe-smoke
 ./tests/cascade-unit
 ./tests/cascade-smoke
+./tests/cascade-bounded-unit
+./tests/cascade-bounded-smoke
 ./tests/ensemble-unit
 ./tests/ensemble-smoke
 ./tests/ensemble-regression

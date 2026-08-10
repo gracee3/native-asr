@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-cascade-bounded.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+datasets=$work/datasets
+mkdir -p "$datasets/manifests" "$work/audio"
+python3 - "$datasets" "$work/audio" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+import wave
+
+datasets, audio_root = map(Path, sys.argv[1:])
+for dataset in ("librispeech-test-clean", "librispeech-test-other"):
+    rows = []
+    split = dataset.removeprefix("librispeech-")
+    for index in range(4):
+        identifier = f"{split}-{index:04d}"
+        audio = audio_root / f"{identifier}.wav"
+        frames = 1600 + index * 160
+        with wave.open(str(audio), "wb") as destination:
+            destination.setnchannels(1); destination.setsampwidth(2); destination.setframerate(16000)
+            destination.writeframes(b"\x01\x00" * frames)
+        rows.append({"utterance_id": identifier, "split": split,
+                     "source_path": str(audio), "prepared_path": str(audio),
+                     "reference": f"UTTERANCE {index} FROM {split}",
+                     "duration_seconds": frames / 16000, "speaker": "test",
+                     "source_sha256": hashlib.sha256(audio.read_bytes()).hexdigest()})
+    manifest = datasets / "manifests" / f"{dataset}.jsonl"
+    manifest.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+PY
+
+run_fake() {
+  local scenario=$1 destination=$2
+  shift 2
+  NATIVE_ASR_ALLOW_TEST_BACKEND=1 NATIVE_ASR_DATASETS=$datasets \
+    "$repo_root/scripts/benchmark-cascade-bounded" \
+      --allow-dirty --test-fake-scenario "$scenario" --limit-per-split 4 \
+      --pilot-pairs-per-split 1 --results-root "$destination/results" \
+      --cache-root "$destination/cache" "$@"
+}
+
+run_fake pass "$work/pass" >"$work/pass.out"
+run_dir=$(find "$work/pass/results" -mindepth 1 -maxdepth 1 -type d)
+jq -e '.phase == "complete" and .pass == true and .pair_gate_pass == true
+  and .paced_gate_pass == true' "$run_dir/verdict.json" >/dev/null
+jq -e '.identity.options.limit_per_split == 4
+  and .identity.options.gap_frames == 25600' "$run_dir/run_manifest.json" >/dev/null
+[[ $(find "$run_dir/details" -name '*.json' | wc -l) == 12 ]]
+[[ $(find "$run_dir/pairs" -name '*.json' | wc -l) == 4 ]]
+[[ -f $run_dir/paced_stream.json && -f $run_dir/summary.json ]]
+[[ -z $(find "$run_dir" -type f -name '.*' -print -quit) ]]
+
+# An exact fingerprint resumes in place without creating another result tree.
+run_fake pass "$work/pass" >"$work/resume.out"
+grep -Fq 'resume: bounded run already complete' "$work/resume.out"
+[[ $(find "$work/pass/results" -mindepth 1 -maxdepth 1 -type d | wc -l) == 1 ]]
+
+set +e
+run_fake pilot-fatal "$work/pilot" >"$work/pilot.out" 2>"$work/pilot.err"
+pilot_status=$?
+run_fake timeout "$work/timeout" --pair-timeout-seconds 0.01 >"$work/timeout.out" 2>"$work/timeout.err"
+timeout_status=$?
+run_fake deadline "$work/deadline" >"$work/deadline.out" 2>"$work/deadline.err"
+deadline_status=$?
+set -e
+[[ $pilot_status == 1 && $timeout_status == 1 && $deadline_status == 1 ]]
+pilot_dir=$(find "$work/pilot/results" -mindepth 1 -maxdepth 1 -type d)
+timeout_dir=$(find "$work/timeout/results" -mindepth 1 -maxdepth 1 -type d)
+deadline_dir=$(find "$work/deadline/results" -mindepth 1 -maxdepth 1 -type d)
+jq -e '.phase == "pilot" and .pass == false' "$pilot_dir/verdict.json" >/dev/null
+[[ $(find "$pilot_dir/details" -name '*.json' | wc -l) == 1 ]]
+jq -e '.failure.kind == "ModeTimeout"' "$timeout_dir/verdict.json" >/dev/null
+jq -e '.phase == "deadline" and .failed_guardrails == ["overall_deadline"]' \
+  "$deadline_dir/verdict.json" >/dev/null
+
+printf '%s\n' 'bounded cascade integration smoke: ok'

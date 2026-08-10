@@ -128,3 +128,43 @@ terminal metrics, runtime failure, or cancellation publishes available safe
 evidence but no `transcript.txt`. Cancellation signals the full container
 client process group, escalates if needed, and removes the exact job container
 if the engine left one behind.
+
+## Bounded benchmark gate
+
+The cascade-specific engineering gate is deliberately separate from the full
+benchmark runners:
+
+```bash
+./scripts/benchmark-cascade-bounded
+# or
+just bench-cascade-bounded
+```
+
+It SHA-256-ranks at most 100 prepared utterances from each LibriSpeech split,
+pairs adjacent utterances, and inserts exactly 25,600 PCM16 frames (1.6
+seconds) of silence. Constructed recordings and their fingerprinted source,
+digest, reference, duration, and boundary manifest live under
+`$NATIVE_ASR_CACHE/cascade-bounded/`, outside the repository.
+
+The runner first executes five unpaced cascade-only pilot pairs from each
+split. A fatal runtime, event/metric/provenance error, or model-load-count
+mismatch stops the pilot immediately. Only a passing pilot proceeds to all 50
+pairs per split, with each pair evaluated by the cascade, whole-recording
+Parakeet TDT, and whole-recording Nemotron in that order. Each mode and pair is
+atomically checkpointed, and resume accepts only the exact cache, image,
+model, adapter, Git, and option fingerprint.
+
+The pair gate enforces the provisional-update, segment, silence, fallback, and
+relative-WER limits recorded in `pair_gate.json`. Only a passing pair gate can
+create and pace the sub-300-second test-other stream. That final gate measures
+inserted-gap endpoint recall, partial source-clock lag, correction latency,
+fallbacks, model loads, and end-to-end RTF. Pair modes have a cumulative
+120-second budget, the paced mode has a 15-minute timeout, and all work is
+bounded by a 60-minute deadline.
+
+Results default to `/data/benchmarks/native-asr/cascade/<fingerprint>/` and
+include the run/cache manifests, mode and pair details, aggregate summaries,
+gate verdicts, failure diagnostics, and cascade audit-bundle references. They
+are external evidence, not a published benchmark snapshot. A pass means the
+cascade is ready for the next engineering stage; it is not approval for
+default promotion, and the command never starts a larger benchmark.

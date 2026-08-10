@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+PYTHONPATH="$repo_root/scripts/lib" python3 - <<'PY'
+import tempfile
+from pathlib import Path
+import sys
+import wave
+
+from cascade_bounded import (
+    GAP_FRAMES, NEMOTRON_ALIAS, PARAKEET_ALIAS, aggregate_pairs,
+    atomic_json, boundary_diagnostic, deterministic_pairs, endpoint_attribution,
+    fingerprint, ModeTimeout, ranked, run_process, wer_record, write_pair_wav,
+)
+
+
+def row(identifier, reference="ONE TWO"):
+    return {"utterance_id": identifier, "reference": reference,
+            "source_sha256": identifier * 8, "prepared_path": "/unused",
+            "duration_seconds": 0.1}
+
+
+rows = [row(name) for name in ("d", "a", "c", "b")]
+chosen = ranked(rows, 4)
+assert chosen == ranked(list(reversed(rows)), 4)
+pairs = deterministic_pairs(chosen, "librispeech-test-clean")
+assert len(pairs) == 2
+assert [member["utterance_id"] for member in pairs[0]["members"]] == [
+    member["utterance_id"] for member in deterministic_pairs(chosen, "librispeech-test-clean")[0]["members"]
+]
+
+with tempfile.TemporaryDirectory() as raw:
+    root = Path(raw)
+    inputs = []
+    for index, frames in enumerate((1600, 3200)):
+        path = root / f"{index}.wav"
+        with wave.open(str(path), "wb") as audio:
+            audio.setnchannels(1); audio.setsampwidth(2); audio.setframerate(16000)
+            audio.writeframes((bytes([index + 1, 0])) * frames)
+        inputs.append(path)
+    output = root / "pair.wav"
+    first, second = write_pair_wav(output, *inputs)
+    with wave.open(str(output), "rb") as audio:
+        payload = audio.readframes(audio.getnframes())
+        assert audio.getnframes() == first + GAP_FRAMES + second
+    gap = payload[first * 2:(first + GAP_FRAMES) * 2]
+    assert len(gap) == GAP_FRAMES * 2 and gap == b"\0" * len(gap)
+    destination = root / "atomic" / "value.json"
+    atomic_json(destination, {"ok": True})
+    assert destination.read_text() == '{"ok":true}\n'
+    assert not list(destination.parent.glob(".value.json.*"))
+
+score = wer_record("ONE TWO THREE", "ONE FOUR THREE EXTRA")
+assert score["wer_counts"] == {"errors": 2, "substitutions": 1, "deletions": 0,
+                               "insertions": 1, "reference_words": 3}
+attribution = endpoint_attribution([1.8, 5.0, 10.0], [
+    {"start_seconds": 1.0, "end_seconds": 2.6},
+    {"start_seconds": 4.2, "end_seconds": 5.8},
+])
+assert attribution["hits"] == 2 and attribution["recall"] == 1.0
+
+source_pairs = []
+details = {}
+for split in ("test-clean", "test-other"):
+    pair_id = f"{split}-pair"
+    pair = {"pair_id": pair_id, "split": split,
+            "members": [{"reference": "ONE TWO"}, {"reference": "THREE FOUR"}]}
+    source_pairs.append(pair)
+    details[pair_id] = {}
+    for mode in ("cascade", "parakeet", "nemotron"):
+        details[pair_id][mode] = {"status": "complete", **wer_record("ONE TWO THREE FOUR", "ONE TWO THREE FOUR")}
+    details[pair_id]["cascade"].update({
+        "counts": {"segments": 2, "provisional_updates": 1, "parakeet_segments": 2,
+                   "nemotron_fallbacks": 0, "silence_segments": 0, "warnings": 0},
+        "model_load_counts": {NEMOTRON_ALIAS: 1, PARAKEET_ALIAS: 1},
+    })
+aggregate = aggregate_pairs(source_pairs, details)
+assert aggregate["pooled"]["cascade"]["wer"] == 0
+assert aggregate["pooled"]["cascade_contract"]["with_two_authoritative_segments"] == 2
+diagnostic = boundary_diagnostic(source_pairs[0], "ONE TWO TWO THREE FOUR")
+assert diagnostic["possible_boundary_repetitions"] == ["TWO"]
+
+identity = {"cache": "a", "options": {"limit": 100}}
+assert fingerprint(identity) == fingerprint({"options": {"limit": 100}, "cache": "a"})
+assert fingerprint(identity) != fingerprint({"cache": "a", "options": {"limit": 98}})
+try:
+    run_process([sys.executable, "-c", "import time; time.sleep(10)"], 0.02, dict(__import__("os").environ))
+except ModeTimeout:
+    pass
+else:
+    raise AssertionError("subprocess timeout was not enforced")
+print("bounded cascade unit tests: ok")
+PY

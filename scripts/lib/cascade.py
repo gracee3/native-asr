@@ -446,7 +446,9 @@ class CascadeJob:
             record = self.records.get(alias)
             if record is None or record["runtime"] != "nemo-speech":
                 raise ValidationError(f"fixed cascade model is unavailable: {alias}")
-        _command_output([str(verify), *MODEL_ALIASES], "model verification", self.env)
+        verified = self.env.get("NATIVE_ASR_MODEL_VERIFIED_ALIASES", "").split(",")
+        if verified != list(MODEL_ALIASES):
+            _command_output([str(verify), *MODEL_ALIASES], "model verification", self.env)
         self.models_root = self.models_root.expanduser().resolve(strict=True)
         runtime_root = self.models_root / "nemo-speech"
         if not runtime_root.is_dir():

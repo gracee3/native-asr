@@ -102,6 +102,10 @@ bench-full:
 bench-test-clean-pair:
     @./scripts/run-test-clean-pair
 
+# Run only the bounded, checkpointed two-pass cascade benchmark gate.
+bench-cascade-bounded:
+    @./scripts/benchmark-cascade-bounded
+
 stream alias audio:
     @./scripts/stream {{ quote(alias) }} {{ quote(audio) }}
 
