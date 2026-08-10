@@ -23,7 +23,10 @@ from typing import Any, Iterable
 import wave
 
 from batch_adapter import _json_text, _runtime_json_payload
-from cascade import NEMOTRON_ALIAS, PARAKEET_ALIAS, _adapter_sha256
+from cascade import (
+    ENDPOINT_POLICY, ENDPOINT_SILENCE_MILLISECONDS, NEMOTRON_ALIAS,
+    PARAKEET_ALIAS, _adapter_sha256,
+)
 from evaluation import NORMALIZATION_VERSION, errors, normalize
 
 
@@ -38,6 +41,9 @@ SPLITS = ("librispeech-test-clean", "librispeech-test-other")
 MODES = ("cascade", "parakeet", "nemotron")
 IMAGE = "asr-nemo-speech"
 TIME_RE = re.compile(r"^NATIVE_ASR_TIME\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$", re.M)
+ENDPOINT_SILENCE_SECONDS = ENDPOINT_SILENCE_MILLISECONDS / 1_000
+PILOT_MAX_EXTRA_ENDPOINT_PAIR_RATE = 0.20
+BASELINE_MODES = ("parakeet", "nemotron")
 
 
 class BenchmarkError(RuntimeError):
@@ -377,6 +383,75 @@ def cascade_adapter_digest(root: Path) -> str:
     ])
 
 
+def _fake_baseline_components(variant: str = "default") -> dict[str, Any]:
+    def component(kind: str, path: str) -> dict[str, str]:
+        return {"path": path, "sha256": hashlib.sha256(
+            f"fake-baseline-component:{variant}:{kind}:{path}".encode()
+        ).hexdigest()}
+
+    value = {
+        "schema_version": SCHEMA_VERSION,
+        "nemo_cli": component("nemo_cli", "/opt/native-asr/bin/nemo-speech"),
+        "linked_native_libraries": [
+            component("linked_native_library", "/opt/native-asr/lib/libnemo_speech_asr.so"),
+        ],
+        "timing_binary": component("timing_binary", "/usr/bin/time"),
+    }
+    value["components_fingerprint"] = fingerprint(value)
+    return value
+
+
+def baseline_component_fingerprints(engine: str, image: str,
+                                    fake_variant: str | None = None) -> dict[str, Any]:
+    """Hash every executable/library component used by a baseline process."""
+    if fake_variant is not None:
+        return _fake_baseline_components(fake_variant)
+    script = r'''
+set -eu
+cli=/opt/native-asr/bin/nemo-speech
+timer=/usr/bin/time
+emit() {
+    kind=$1
+    path=$(readlink -f "$2")
+    set -- $(sha256sum "$path")
+    printf '%s\t%s\t%s\n' "$kind" "$path" "$1"
+}
+emit nemo_cli "$cli"
+ldd "$cli" | awk '$2 == "=>" && $3 ~ /^\// {print $3} $1 ~ /^\// {print $1}' | sort -u |
+while IFS= read -r library; do
+    emit linked_native_library "$library"
+done
+emit timing_binary "$timer"
+'''
+    process = subprocess.run(
+        [engine, "run", "--rm", "--network", "none", "--read-only",
+         "--entrypoint", "/bin/sh", image, "-c", script],
+        text=True, capture_output=True,
+    )
+    if process.returncode:
+        detail = process.stderr.strip() or process.stdout.strip() or f"exit {process.returncode}"
+        raise BenchmarkError(f"cannot fingerprint baseline components in {image}: {detail}")
+    grouped: dict[str, list[dict[str, str]]] = {
+        "nemo_cli": [], "linked_native_library": [], "timing_binary": [],
+    }
+    for line in process.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3 or fields[0] not in grouped or not re.fullmatch(r"[0-9a-f]{64}", fields[2]):
+            raise BenchmarkError(f"malformed baseline component fingerprint from {image}")
+        grouped[fields[0]].append({"path": fields[1], "sha256": fields[2]})
+    if len(grouped["nemo_cli"]) != 1 or len(grouped["timing_binary"]) != 1 or not grouped["linked_native_library"]:
+        raise BenchmarkError(f"incomplete baseline component fingerprints from {image}")
+    libraries = sorted(grouped["linked_native_library"], key=lambda row: row["path"])
+    value = {
+        "schema_version": SCHEMA_VERSION,
+        "nemo_cli": grouped["nemo_cli"][0],
+        "linked_native_libraries": libraries,
+        "timing_binary": grouped["timing_binary"][0],
+    }
+    value["components_fingerprint"] = fingerprint(value)
+    return value
+
+
 def provenance(root: Path, records: dict[str, dict[str, str]], engine: str,
                fake: bool = False) -> dict[str, Any]:
     revision = git_output(root, "rev-parse", "HEAD")
@@ -384,10 +459,14 @@ def provenance(root: Path, records: dict[str, dict[str, str]], engine: str,
     image_id = "sha256:fake-cascade-bounded" if fake else subprocess.check_output(
         [engine, "image", "inspect", IMAGE, "--format", "{{.Id}}"], text=True
     ).strip().splitlines()[-1]
+    fake_variant = os.environ.get("NATIVE_ASR_TEST_BASELINE_COMPONENT_VARIANT", "default")
     return {
         "git_revision": revision, "git_dirty": dirty, "adapter_sha256": adapter_digest(root),
         "cascade_adapter_sha256": cascade_adapter_digest(root),
         "image": IMAGE, "image_id": image_id,
+        "baseline_component_fingerprints": baseline_component_fingerprints(
+            engine, image_id, fake_variant if fake else None
+        ),
         "models": {alias: {key: records[alias][key] for key in (
             "artifact_id", "alias", "revision", "sha256", "filename", "license"
         )} for alias in (NEMOTRON_ALIAS, PARAKEET_ALIAS)},
@@ -417,6 +496,257 @@ def _wer(counts: dict[str, int]) -> float | None:
     return counts["errors"] / counts["reference_words"] if counts["reference_words"] else None
 
 
+def baseline_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Return only selection/normalization/runtime options that affect baselines."""
+    common_runtime = {
+        "entrypoint": "/usr/bin/time",
+        "timing_binary": "/usr/bin/time",
+        "cli": "/opt/native-asr/bin/nemo-speech",
+        "command": "transcribe",
+        "input": "/audio",
+        "output_dir": "/output",
+        "device": "cpu",
+        "format": "json",
+        "word_times": True,
+        "concurrency": 1,
+        "force": True,
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "recipe_version": RECIPE_VERSION,
+        "selection": {
+            key: options[key] for key in (
+                "limit_per_split", "pairs_per_split", "ranking", "pairing", "gap_frames",
+            )
+        },
+        "normalization": options["normalization"],
+        "modes": {
+            "parakeet": {**common_runtime, "model_alias": PARAKEET_ALIAS, "stream": False},
+            "nemotron": {**common_runtime, "model_alias": NEMOTRON_ALIAS, "stream": True},
+        },
+    }
+
+
+class BaselineReuse:
+    """Read-only validator/importer for baseline details from an older run."""
+
+    def __init__(self, source_root: Path, cache_manifest: dict[str, Any],
+                 pairs: list[dict[str, Any]], current_provenance: dict[str, Any],
+                 current_baseline_options: dict[str, Any], engine: str, fake: bool):
+        self.source_root = source_root.expanduser().resolve()
+        self.cache_manifest = cache_manifest
+        self.current_pairs = {pair["pair_id"]: pair for pair in pairs}
+        self.current_provenance = current_provenance
+        self.current_baseline_options = current_baseline_options
+        self.engine, self.fake = engine, fake
+        self.source_manifest: dict[str, Any] = {}
+        self.source_identity: dict[str, Any] = {}
+        self.source_pairs: dict[str, dict[str, Any]] = {}
+        self.source_components: dict[str, Any] | None = None
+        self.global_error: str | None = None
+        self.report_path: Path | None = None
+        self.report: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "requested_from": str(self.source_root),
+            "imported": [], "rejected": [],
+        }
+        try:
+            self._validate_source()
+        except (BenchmarkError, OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+            self.global_error = str(error)
+        self.report["source_run_fingerprint"] = self.source_manifest.get("run_fingerprint")
+        self.report["eligible"] = self.global_error is None
+        self.report["global_rejection"] = self.global_error
+        self.report["source_baseline_component_fingerprints"] = self.source_components
+        self.report["current_baseline_component_fingerprints"] = current_provenance.get(
+            "baseline_component_fingerprints"
+        )
+
+    def _validate_source(self) -> None:
+        manifest_path = self.source_root / "run_manifest.json"
+        if not manifest_path.is_file():
+            raise BenchmarkError(f"baseline reuse run manifest is missing: {manifest_path}")
+        self.source_manifest = read_json(manifest_path)
+        source_run_fingerprint = self.source_manifest.get("run_fingerprint")
+        if not isinstance(source_run_fingerprint, str) or not source_run_fingerprint:
+            raise BenchmarkError("baseline reuse run fingerprint is missing")
+        self.source_identity = self.source_manifest.get("identity")
+        if not isinstance(self.source_identity, dict):
+            raise BenchmarkError("baseline reuse identity is missing")
+        if fingerprint(self.source_identity) != source_run_fingerprint:
+            raise BenchmarkError("baseline reuse run fingerprint does not match its identity")
+        if (self.source_identity.get("schema_version") != SCHEMA_VERSION or
+                self.source_identity.get("recipe_version") != RECIPE_VERSION):
+            raise BenchmarkError("baseline reuse schema or recipe changed")
+        if self.source_identity.get("cache_fingerprint") != self.cache_manifest["cache_fingerprint"]:
+            raise BenchmarkError("baseline reuse cache fingerprint mismatch")
+
+        source_options = self.source_identity.get("options")
+        if not isinstance(source_options, dict):
+            raise BenchmarkError("baseline reuse options are missing")
+        recorded_baseline_options = self.source_identity.get("baseline_options")
+        if recorded_baseline_options is None:
+            recorded_baseline_options = baseline_options(source_options)
+        if recorded_baseline_options != self.current_baseline_options:
+            raise BenchmarkError("baseline reuse options mismatch")
+        if source_options.get("normalization") != NORMALIZATION_VERSION:
+            raise BenchmarkError("baseline reuse normalization mismatch")
+
+        source_provenance = self.source_identity.get("provenance")
+        if not isinstance(source_provenance, dict):
+            raise BenchmarkError("baseline reuse provenance is missing")
+        if source_provenance.get("models") != self.current_provenance.get("models"):
+            raise BenchmarkError("baseline reuse model artifacts mismatch")
+        image_id = source_provenance.get("image_id")
+        if not isinstance(image_id, str) or not image_id:
+            raise BenchmarkError("baseline reuse image ID is missing")
+        recorded_components = source_provenance.get("baseline_component_fingerprints")
+        if self.fake:
+            if not isinstance(recorded_components, dict):
+                raise BenchmarkError("fake baseline reuse component fingerprints are missing")
+            self.source_components = recorded_components
+        else:
+            self.source_components = baseline_component_fingerprints(self.engine, image_id)
+            if recorded_components is not None and recorded_components != self.source_components:
+                raise BenchmarkError("recorded baseline component fingerprints changed")
+        if self.source_components != self.current_provenance.get("baseline_component_fingerprints"):
+            raise BenchmarkError("baseline runtime component fingerprints mismatch")
+
+        cache_path_raw = self.source_manifest.get("pair_cache_manifest")
+        if not isinstance(cache_path_raw, str):
+            raise BenchmarkError("baseline reuse cache manifest path is missing")
+        source_cache = read_json(Path(cache_path_raw))
+        if (source_cache.get("cache_fingerprint") != self.cache_manifest["cache_fingerprint"] or
+                source_cache.get("identity") != self.cache_manifest.get("identity")):
+            raise BenchmarkError("baseline reuse cache manifest mismatch")
+        if fingerprint(source_cache["identity"]) != source_cache["cache_fingerprint"]:
+            raise BenchmarkError("baseline reuse cache fingerprint does not match its identity")
+        self.source_pairs = {
+            pair["pair_id"]: pair for pair in source_cache.get("pairs", [])
+            if isinstance(pair, dict) and isinstance(pair.get("pair_id"), str)
+        }
+        if set(self.source_pairs) != set(self.current_pairs):
+            raise BenchmarkError("baseline reuse pair set mismatch")
+
+    def identity(self) -> dict[str, Any]:
+        return {
+            "requested_from": str(self.source_root),
+            "source_run_fingerprint": self.source_manifest.get("run_fingerprint"),
+            "eligible": self.global_error is None,
+            "global_rejection": self.global_error,
+            "source_baseline_components_fingerprint": (
+                self.source_components or {}
+            ).get("components_fingerprint"),
+        }
+
+    def attach(self, run_root: Path) -> None:
+        self.report_path = run_root / "baseline_reuse.json"
+        if self.report_path.is_file():
+            existing = read_json(self.report_path)
+            if (existing.get("requested_from") != str(self.source_root) or
+                    existing.get("source_run_fingerprint") !=
+                    self.source_manifest.get("run_fingerprint")):
+                raise BenchmarkError("baseline reuse checkpoint mismatch")
+            self.report = existing
+        else:
+            self._checkpoint()
+
+    def _checkpoint(self) -> None:
+        if self.report_path is not None:
+            self.report["updated_at"] = utc_now()
+            atomic_json(self.report_path, self.report)
+
+    def _reject(self, key: str, message: str) -> None:
+        if not any(row.get("key") == key for row in self.report["rejected"]):
+            self.report["rejected"].append({"key": key, "reason": message})
+            self._checkpoint()
+
+    def mark_imported(self, key: str, source_detail: str) -> None:
+        if not any(item.get("key") == key for item in self.report["imported"]):
+            self.report["imported"].append({"key": key, "source_detail": source_detail})
+            self._checkpoint()
+
+    def _validate_pair(self, pair: dict[str, Any]) -> None:
+        old = self.source_pairs.get(pair["pair_id"])
+        if old is None:
+            raise BenchmarkError("source pair is missing")
+        if old.get("pair_fingerprint") != pair["pair_fingerprint"]:
+            raise BenchmarkError("pair fingerprint mismatch")
+        if old.get("audio_sha256") != pair["audio_sha256"]:
+            raise BenchmarkError("pair audio digest mismatch")
+        for label, record in (("source", old), ("current", pair)):
+            audio_path = Path(record["audio_path"])
+            if not audio_path.is_file() or sha256(audio_path) != record["audio_sha256"]:
+                raise BenchmarkError(f"{label} pair audio is missing or corrupt")
+
+    def import_detail(self, pair: dict[str, Any], mode: str) -> dict[str, Any] | None:
+        key = f"{pair['pair_id']}:{mode}"
+        if self.global_error is not None:
+            self._reject(key, self.global_error)
+            return None
+        try:
+            if mode not in BASELINE_MODES:
+                raise BenchmarkError("only baseline modes may be reused")
+            self._validate_pair(pair)
+            detail_path = self.source_root / "details" / pair["split"] / pair["pair_id"] / f"{mode}.json"
+            if not detail_path.is_file():
+                raise BenchmarkError("source baseline detail is missing")
+            row = read_json(detail_path)
+            alias = PARAKEET_ALIAS if mode == "parakeet" else NEMOTRON_ALIAS
+            if (row.get("run_fingerprint") != self.source_manifest["run_fingerprint"] or
+                    row.get("pair_fingerprint") != pair["pair_fingerprint"] or
+                    row.get("pair_id") != pair["pair_id"] or row.get("split") != pair["split"]):
+                raise BenchmarkError("source baseline detail fingerprint mismatch")
+            if (row.get("status") != "complete" or row.get("failure") is not None or
+                    row.get("mode") != mode):
+                raise BenchmarkError("source baseline status is not successful")
+            if row.get("model_load_count") != 1:
+                raise BenchmarkError("source baseline model-load count is not one")
+            timing = row.get("timing")
+            if (not isinstance(timing, dict) or timing.get("exit_status") != 0 or
+                    not isinstance(timing.get("wall_seconds"), (int, float)) or
+                    isinstance(timing.get("wall_seconds"), bool) or
+                    not math.isfinite(timing["wall_seconds"]) or timing["wall_seconds"] < 0):
+                raise BenchmarkError("source baseline timing is not successful")
+            source_provenance = self.source_identity["provenance"]
+            detail_provenance = row.get("provenance")
+            if (not isinstance(detail_provenance, dict) or
+                    detail_provenance.get("git_revision") != source_provenance.get("git_revision") or
+                    detail_provenance.get("image_id") != source_provenance.get("image_id") or
+                    detail_provenance.get("model") != source_provenance["models"][alias]):
+                raise BenchmarkError("source baseline provenance mismatch")
+            hypothesis = row.get("hypothesis_raw")
+            if not isinstance(hypothesis, str):
+                raise BenchmarkError("source baseline hypothesis is missing")
+            expected_score = wer_record(pair["reference_raw"], hypothesis)
+            for field in ("reference_raw", "reference_normalized", "hypothesis_normalized", "wer_counts"):
+                if row.get(field) != expected_score[field]:
+                    raise BenchmarkError(f"source baseline {field} mismatch")
+            artifact = row.get("artifact")
+            if not self.fake:
+                if not isinstance(artifact, str):
+                    raise BenchmarkError("source baseline artifact is missing")
+                artifact_path = Path(artifact)
+                if not artifact_path.is_dir() or not (artifact_path / "runtime.json").is_file():
+                    raise BenchmarkError("source baseline artifact is incomplete")
+
+            imported = json.loads(json.dumps(row))
+            imported["reused_from"] = {
+                "run_dir": str(self.source_root),
+                "run_fingerprint": self.source_manifest["run_fingerprint"],
+                "detail": str(detail_path),
+                "original_completed_at": row.get("completed_at"),
+            }
+            imported["baseline_component_fingerprints"] = {
+                "source_image": self.source_components,
+                "current_image": self.current_provenance["baseline_component_fingerprints"],
+            }
+            return imported
+        except (BenchmarkError, OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+            self._reject(key, str(error))
+            return None
+
+
 def endpoint_attribution(endpoints: list[float], gaps: list[dict[str, float]],
                          tolerance: float = 0.05) -> dict[str, Any]:
     unused = set(range(len(endpoints)))
@@ -425,7 +755,9 @@ def endpoint_attribution(endpoints: list[float], gaps: list[dict[str, float]],
         candidates = [index for index in unused if
                       gap["start_seconds"] - tolerance <= endpoints[index] <= gap["end_seconds"] + tolerance]
         if candidates:
-            chosen = min(candidates, key=lambda index: abs(endpoints[index] - gap["start_seconds"] - 0.8))
+            chosen = min(candidates, key=lambda index: abs(
+                endpoints[index] - gap["start_seconds"] - ENDPOINT_SILENCE_SECONDS
+            ))
             unused.remove(chosen)
             matches.append({"gap_index": gap_index, "endpoint_seconds": endpoints[chosen], "hit": True})
         else:
@@ -434,6 +766,22 @@ def endpoint_attribution(endpoints: list[float], gaps: list[dict[str, float]],
     return {
         "hits": hits, "gaps": len(gaps), "recall": hits / len(gaps) if gaps else None,
         "matches": matches, "unattributed_endpoints": [endpoints[index] for index in sorted(unused)],
+    }
+
+
+def pilot_endpoint_diagnostic(pair: dict[str, Any], detail: dict[str, Any],
+                              tolerance: float = 0.05) -> dict[str, Any]:
+    endpoints = [float(value) for value in detail.get("endpoints_seconds", [])]
+    attribution = endpoint_attribution(endpoints, [pair["boundaries"]["gap"]], tolerance)
+    eof = float(pair["duration_seconds"])
+    extras = [value for value in attribution["unattributed_endpoints"]
+              if abs(value - eof) > tolerance]
+    eof_hits = sum(abs(value - eof) <= tolerance for value in attribution["unattributed_endpoints"])
+    return {
+        "gap_endpointed": attribution["hits"] == 1,
+        "eof_endpointed": eof_hits == 1,
+        "extra_endpoints_seconds": extras,
+        "endpoint_attribution": attribution,
     }
 
 
@@ -667,12 +1015,20 @@ class FakeBackend:
         reference = source["reference_raw"]
         if paced:
             gaps = source["gaps"]
-            endpoints = [gap["start_seconds"] + 0.8 for gap in gaps] + [source["duration_seconds"]]
+            endpoints = [gap["start_seconds"] + ENDPOINT_SILENCE_SECONDS
+                         for gap in gaps] + [source["duration_seconds"]]
             segments = len(gaps) + 1
         else:
             gap = source["boundaries"]["gap"]
-            endpoints = [gap["start_seconds"] + 0.8, source["duration_seconds"]]
+            endpoints = [gap["start_seconds"] + ENDPOINT_SILENCE_SECONDS,
+                         source["duration_seconds"]]
             segments = 2
+            if self.scenario == "pilot-missed-endpoint":
+                endpoints, segments = [source["duration_seconds"]], 1
+            elif self.scenario == "pilot-extra-endpoints":
+                endpoints = [source["boundaries"]["first"]["end_seconds"] / 2,
+                             *endpoints]
+                segments = 3
         loads = {NEMOTRON_ALIAS: 1, PARAKEET_ALIAS: 1}
         if self.scenario == "load-count" and self.calls == 1: loads[PARAKEET_ALIAS] = 2
         counts = {"segments": segments, "provisional_updates": segments,
@@ -700,7 +1056,11 @@ class FakeBackend:
             "status": "complete", "mode": mode, **wer_record(pair["reference_raw"], pair["reference_raw"]),
             "timing": {"wall_seconds": 0.05, "user_seconds": 0.01, "system_seconds": 0.01,
                        "peak_rss_kb": 1000, "exit_status": 0},
-            "peak_rss_kb": 1000, "model_load_count": 1, "provenance": self.prov,
+            "peak_rss_kb": 1000, "model_load_count": 1,
+            "provenance": {"git_revision": self.prov["git_revision"],
+                           "adapter_sha256": self.prov["adapter_sha256"],
+                           "image_id": self.prov["image_id"],
+                           "model": self.prov["models"][alias]},
             "artifact": "fake", "failure": None,
         }
 
@@ -824,9 +1184,12 @@ def parser() -> argparse.ArgumentParser:
                         default=Path("/data/benchmarks/native-asr/cascade"))
     result.add_argument("--cache-root", type=Path)
     result.add_argument("--allow-dirty", action="store_true", help=argparse.SUPPRESS)
-    result.add_argument("--test-fake-scenario", choices=("pass", "pilot-fatal", "timeout", "deadline",
+    result.add_argument("--test-fake-scenario", choices=("pass", "pilot-fatal", "pilot-missed-endpoint",
+                                                          "pilot-extra-endpoints", "timeout", "deadline",
                                                           "missing-metrics", "load-count"),
                         help=argparse.SUPPRESS)
+    result.add_argument("--reuse-baselines-from", type=Path, metavar="RUN_DIR",
+                        help="reuse individually verified Parakeet/Nemotron baseline details")
     return result
 
 
@@ -873,6 +1236,7 @@ def main(argv: list[str] | None = None) -> int:
             "limit_per_split": args.limit_per_split, "pairs_per_split": args.limit_per_split // 2,
             "ranking": "sha256(utterance_id)", "pairing": "adjacent-ranked",
             "gap_seconds": GAP_SECONDS, "gap_frames": GAP_FRAMES,
+            "endpointing": ENDPOINT_POLICY,
             "pilot_pairs_per_split": args.pilot_pairs_per_split,
             "pair_timeout_seconds": args.pair_timeout_seconds,
             "paced_timeout_seconds": args.paced_timeout_seconds,
@@ -880,9 +1244,15 @@ def main(argv: list[str] | None = None) -> int:
             "stream_max_seconds_exclusive": args.stream_max_seconds,
             "normalization": NORMALIZATION_VERSION,
         }
+        baseline_policy = baseline_options(options)
+        reuse = (BaselineReuse(args.reuse_baselines_from, cache_manifest, pairs, prov,
+                               baseline_policy, engine, fake)
+                 if args.reuse_baselines_from is not None else None)
         run_identity = {"schema_version": SCHEMA_VERSION, "recipe_version": RECIPE_VERSION,
                         "cache_fingerprint": cache_manifest["cache_fingerprint"],
-                        "provenance": prov, "options": options}
+                        "provenance": prov, "options": options,
+                        "baseline_options": baseline_policy,
+                        "baseline_reuse": reuse.identity() if reuse is not None else None}
         run_fingerprint = fingerprint(run_identity)
         run_root = args.results_root.resolve() / run_fingerprint
         run_root.mkdir(parents=True, exist_ok=True)
@@ -900,6 +1270,8 @@ def main(argv: list[str] | None = None) -> int:
         if existing_manifest.is_file() and read_json(existing_manifest).get("identity") != run_identity:
             raise BenchmarkError(f"run manifest fingerprint mismatch: {existing_manifest}")
         if not existing_manifest.exists(): atomic_json(existing_manifest, run_manifest)
+        if reuse is not None:
+            reuse.attach(run_root)
         final_path = run_root / "verdict.json"
         if final_path.is_file() and read_json(final_path).get("phase") == "complete":
             verdict = read_json(final_path)
@@ -927,6 +1299,9 @@ def main(argv: list[str] | None = None) -> int:
                     if row.get("run_fingerprint") != run_fingerprint or row.get("pair_fingerprint") != pair["pair_fingerprint"]:
                         raise BenchmarkError(f"resume detail fingerprint mismatch: {path}")
                     details[pair["pair_id"]][mode] = row
+                    if reuse is not None and "reused_from" in row:
+                        reuse.mark_imported(f"{pair['pair_id']}:{mode}",
+                                            row["reused_from"]["detail"])
 
         def checkpoint() -> None:
             state["elapsed_seconds"] = prior_elapsed + (time.monotonic() - started)
@@ -935,20 +1310,26 @@ def main(argv: list[str] | None = None) -> int:
         def execute_mode(pair: dict[str, Any], mode: str) -> dict[str, Any]:
             if mode in details[pair["pair_id"]]: return details[pair["pair_id"]][mode]
             used = sum(float(details[pair["pair_id"]].get(item, {}).get("budget_seconds", 0) or 0)
-                       for item in MODES)
+                       for item in MODES
+                       if "reused_from" not in details[pair["pair_id"]].get(item, {}))
             try:
                 pair_remaining = args.pair_timeout_seconds - used
                 if pair_remaining <= 0:
                     raise ModeTimeout("cumulative pair budget was exhausted before launch")
                 timeout = min(remaining(), pair_remaining)
-                if mode == "cascade": row = backend.cascade(pair, timeout)
-                elif mode == "parakeet": row = backend.baseline(pair, PARAKEET_ALIAS, timeout)
-                else: row = backend.baseline(pair, NEMOTRON_ALIAS, timeout)
-                timing = row.get("timing", {})
-                row["budget_seconds"] = float(
-                    timing.get("process", {}).get("wall_seconds", 0)
-                    if mode == "cascade" else timing.get("wall_seconds", 0)
-                )
+                imported = (reuse.import_detail(pair, mode)
+                            if reuse is not None and mode in BASELINE_MODES else None)
+                if imported is not None:
+                    row = imported
+                else:
+                    if mode == "cascade": row = backend.cascade(pair, timeout)
+                    elif mode == "parakeet": row = backend.baseline(pair, PARAKEET_ALIAS, timeout)
+                    else: row = backend.baseline(pair, NEMOTRON_ALIAS, timeout)
+                    timing = row.get("timing", {})
+                    row["budget_seconds"] = float(
+                        timing.get("process", {}).get("wall_seconds", 0)
+                        if mode == "cascade" else timing.get("wall_seconds", 0)
+                    )
             except DeadlineExceeded:
                 raise
             except BenchmarkError as error:
@@ -964,6 +1345,8 @@ def main(argv: list[str] | None = None) -> int:
                         "split": pair["split"], "completed_at": utc_now()})
             path = run_root / "details" / pair["split"] / pair["pair_id"] / f"{mode}.json"
             atomic_json(path, row)
+            if reuse is not None and "reused_from" in row:
+                reuse.mark_imported(f"{pair['pair_id']}:{mode}", row["reused_from"]["detail"])
             details[pair["pair_id"]][mode] = row
             key = f"{pair['pair_id']}:{mode}"
             if key not in state["completed_modes"]: state["completed_modes"].append(key)
@@ -973,6 +1356,11 @@ def main(argv: list[str] | None = None) -> int:
 
         pilot = [pair for split in ("test-clean", "test-other")
                  for pair in [item for item in pairs if item["split"] == split][:args.pilot_pairs_per_split]]
+        pilot_diagnostics = []
+        extra_endpoint_pairs = 0
+        allowed_extra_endpoint_pairs = math.floor(
+            len(pilot) * PILOT_MAX_EXTRA_ENDPOINT_PAIR_RATE
+        )
         for pair in pilot:
             row = execute_mode(pair, "cascade")
             pilot_ok = row.get("status") == "complete" and row.get("model_load_counts") == {
@@ -987,9 +1375,45 @@ def main(argv: list[str] | None = None) -> int:
                 state["phase"] = "pilot_failed"; checkpoint()
                 print(f"FAIL: cascade pilot stopped at {pair['pair_id']}; evidence: {run_root}", file=sys.stderr)
                 return 1
+            diagnostic = {"pair_id": pair["pair_id"], **pilot_endpoint_diagnostic(pair, row)}
+            pilot_diagnostics.append(diagnostic)
+            if not diagnostic["gap_endpointed"]:
+                pilot_verdict = {"schema_version": SCHEMA_VERSION,
+                    "run_fingerprint": run_fingerprint, "phase": "pilot", "pass": False,
+                    "stopped_at_pair": pair["pair_id"], "failure": {
+                        "kind": "endpoint_contract",
+                        "message": "inserted 1.6-second gap was not endpointed",
+                    }, "endpoint_diagnostics": pilot_diagnostics,
+                    "completed_at": utc_now(), "results_root": str(run_root)}
+                atomic_json(run_root / "pilot_verdict.json", pilot_verdict)
+                atomic_json(final_path, pilot_verdict)
+                state["phase"] = "pilot_failed"; checkpoint()
+                print(f"FAIL: cascade pilot missed the gap at {pair['pair_id']}; evidence: {run_root}",
+                      file=sys.stderr)
+                return 1
+            if diagnostic["extra_endpoints_seconds"]:
+                extra_endpoint_pairs += 1
+            if extra_endpoint_pairs > allowed_extra_endpoint_pairs:
+                pilot_verdict = {"schema_version": SCHEMA_VERSION,
+                    "run_fingerprint": run_fingerprint, "phase": "pilot", "pass": False,
+                    "stopped_at_pair": pair["pair_id"], "failure": {
+                        "kind": "over_segmentation",
+                        "message": "extra endpoints remain widespread under the 1.2-second policy",
+                    }, "extra_endpoint_pairs": extra_endpoint_pairs,
+                    "allowed_extra_endpoint_pairs": allowed_extra_endpoint_pairs,
+                    "endpoint_diagnostics": pilot_diagnostics,
+                    "completed_at": utc_now(), "results_root": str(run_root)}
+                atomic_json(run_root / "pilot_verdict.json", pilot_verdict)
+                atomic_json(final_path, pilot_verdict)
+                state["phase"] = "pilot_failed"; checkpoint()
+                print(f"FAIL: cascade pilot remained over-segmented at {pair['pair_id']}; evidence: {run_root}",
+                      file=sys.stderr)
+                return 1
         atomic_json(run_root / "pilot_verdict.json", {"schema_version": SCHEMA_VERSION,
                     "run_fingerprint": run_fingerprint, "phase": "pilot", "pass": True,
-                    "pairs": len(pilot), "completed_at": utc_now()})
+                    "pairs": len(pilot), "extra_endpoint_pairs": extra_endpoint_pairs,
+                    "allowed_extra_endpoint_pairs": allowed_extra_endpoint_pairs,
+                    "endpoint_diagnostics": pilot_diagnostics, "completed_at": utc_now()})
         state["phase"] = "pairs"; checkpoint()
 
         for pair in pairs:

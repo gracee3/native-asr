@@ -3,7 +3,10 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHONPATH="$repo_root/scripts/lib" python3 - <<'PY'
-from cascade import EventValidator, NEMOTRON_ALIAS, PARAKEET_ALIAS, assemble_transcript
+from cascade import (
+    ENDPOINT_POLICY, EventValidator, NEMOTRON_ALIAS, PARAKEET_ALIAS,
+    assemble_transcript,
+)
 
 
 def common(sequence, kind, position, **extra):
@@ -18,7 +21,7 @@ validator = EventValidator("unit")
 validator.accept(common(
     1, "session_started", 0, models=[NEMOTRON_ALIAS, PARAKEET_ALIAS],
     chunk_milliseconds=20,
-    endpointing={"kind": "token_silence", "silence_milliseconds": 800}, paced=False,
+    endpointing=ENDPOINT_POLICY, paced=False,
 ))
 validator.accept(common(
     2, "transcript_update", 0.5, segment_id="segment-000001", track_id="nemotron",
@@ -45,7 +48,7 @@ duplicate = EventValidator("unit")
 duplicate.accept(common(
     1, "session_started", 0, models=[NEMOTRON_ALIAS, PARAKEET_ALIAS],
     chunk_milliseconds=20,
-    endpointing={"kind": "token_silence", "silence_milliseconds": 800}, paced=False,
+    endpointing=ENDPOINT_POLICY, paced=False,
 ))
 partial = common(
     2, "transcript_update", 0.2, segment_id="segment-000001", track_id="nemotron",
@@ -66,7 +69,7 @@ fallback = EventValidator("unit")
 fallback.accept(common(
     1, "session_started", 0, models=[NEMOTRON_ALIAS, PARAKEET_ALIAS],
     chunk_milliseconds=20,
-    endpointing={"kind": "token_silence", "silence_milliseconds": 800}, paced=True,
+    endpointing=ENDPOINT_POLICY, paced=True,
 ))
 fallback.accept(common(
     2, "transcript_update", 1, segment_id="segment-000001", track_id="nemotron",
@@ -89,6 +92,7 @@ bad_time = {**common(
     5, "transcript_update", 2, segment_id="segment-000002", track_id="nemotron",
     revision=1, state="segment_final", text="second",
     source_time={"start_seconds": 1.0, "end_seconds": 2.0}, model_alias=NEMOTRON_ALIAS,
+    words=[{"word": "second", "start_seconds": 0.98, "end_seconds": 1.4}],
 )}
 fallback.accept(bad_time)
 bad_authoritative = common(
@@ -104,6 +108,30 @@ except ValueError as error:
     assert "outside" in str(error)
 else:
     raise AssertionError("unoffset second-segment word accepted")
+
+# Bounds-disabled Nemotron words remain nonnegative and truly ordered.
+try:
+    EventValidator._words({"words": [
+        {"word": "later", "start_seconds": 1.2, "end_seconds": 1.3},
+        {"word": "backward", "start_seconds": 1.1, "end_seconds": 1.2},
+    ]}, 1.0, 2.0, enforce_segment_bounds=False)
+except ValueError as error:
+    assert "monotonic" in str(error)
+else:
+    raise AssertionError("backward Nemotron word order accepted")
+
+# Schema 1 fixes the endpoint policy at 1,200 ms.
+old_policy = EventValidator("unit")
+try:
+    old_policy.accept(common(
+        1, "session_started", 0, models=[NEMOTRON_ALIAS, PARAKEET_ALIAS],
+        chunk_milliseconds=20,
+        endpointing={"kind": "token_silence", "silence_milliseconds": 800}, paced=False,
+    ))
+except ValueError as error:
+    assert "endpoint policy" in str(error)
+else:
+    raise AssertionError("old endpoint policy accepted")
 
 print("cascade unit tests: ok")
 PY

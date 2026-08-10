@@ -17,7 +17,7 @@ namespace {
 
 constexpr int kSampleRate = 16000;
 constexpr size_t kChunkSamples = 320;  // 20 ms at 16 kHz.
-constexpr int kEndpointMs = 800;
+constexpr int kEndpointMs = 1200;
 constexpr const char* kNemotronAlias = "nemo:nemotron-streaming-en";
 constexpr const char* kParakeetAlias = "nemo:parakeet-tdt-v3";
 
@@ -408,7 +408,7 @@ int main(int argc, char** argv) {
         std::string("\"models\":[") + json_string(kNemotronAlias) + "," +
             json_string(kParakeetAlias) +
             "],\"chunk_milliseconds\":20,\"endpointing\":{\"kind\":"
-            "\"token_silence\",\"silence_milliseconds\":800},\"paced\":" +
+            "\"token_silence\",\"silence_milliseconds\":1200},\"paced\":" +
             (pace ? "true" : "false"));
 
     std::vector<float> audio;

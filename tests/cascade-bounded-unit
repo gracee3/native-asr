@@ -11,7 +11,8 @@ import wave
 from cascade_bounded import (
     GAP_FRAMES, NEMOTRON_ALIAS, PARAKEET_ALIAS, aggregate_pairs,
     atomic_json, boundary_diagnostic, deterministic_pairs, endpoint_attribution,
-    fingerprint, ModeTimeout, ranked, run_process, wer_record, write_pair_wav,
+    fingerprint, ModeTimeout, pilot_endpoint_diagnostic, ranked, run_process,
+    wer_record, write_pair_wav,
 )
 
 
@@ -54,11 +55,22 @@ with tempfile.TemporaryDirectory() as raw:
 score = wer_record("ONE TWO THREE", "ONE FOUR THREE EXTRA")
 assert score["wer_counts"] == {"errors": 2, "substitutions": 1, "deletions": 0,
                                "insertions": 1, "reference_words": 3}
-attribution = endpoint_attribution([1.8, 5.0, 10.0], [
+attribution = endpoint_attribution([1.8, 2.2, 5.4, 10.0], [
     {"start_seconds": 1.0, "end_seconds": 2.6},
     {"start_seconds": 4.2, "end_seconds": 5.8},
 ])
 assert attribution["hits"] == 2 and attribution["recall"] == 1.0
+assert [item["endpoint_seconds"] for item in attribution["matches"]] == [2.2, 5.4]
+assert attribution["unattributed_endpoints"] == [1.8, 10.0]
+
+pilot_pair = {"duration_seconds": 8.0, "boundaries": {
+    "gap": {"start_seconds": 3.0, "end_seconds": 4.6},
+}}
+diagnostic = pilot_endpoint_diagnostic(
+    pilot_pair, {"endpoints_seconds": [2.0, 4.2, 8.0]}
+)
+assert diagnostic["gap_endpointed"] and diagnostic["eof_endpointed"]
+assert diagnostic["extra_endpoints_seconds"] == [2.0]
 
 source_pairs = []
 details = {}

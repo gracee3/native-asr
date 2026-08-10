@@ -262,7 +262,7 @@ just cascade recording.m4a recording.cascade
 
 The command emits live schema-1 JSONL on stdout and diagnostics on stderr. It
 loads both fixed models once in one CPU process, uses genuine Nemotron partials
-and natural 800 ms token-silence endpoints, and runs Parakeet synchronously on
+and fixed 1,200 ms token-silence endpoints, and runs Parakeet synchronously on
 each exact endpointed slice. Successful Parakeet text replaces the corresponding
 Nemotron segment; empty/error output falls back explicitly and is counted.
 

@@ -55,6 +55,58 @@ jq -e '.identity.options.limit_per_split == 4
 [[ -f $run_dir/paced_stream.json && -f $run_dir/summary.json ]]
 [[ -z $(find "$run_dir" -type f -name '.*' -print -quit) ]]
 
+# Exact baseline runtime/cache/model/options matches import every baseline while
+# rerunning every cascade. Imported details retain their original provenance.
+run_fake pass "$work/reuse" --cache-root "$work/pass/cache" \
+  --reuse-baselines-from "$run_dir" >"$work/reuse.out"
+reuse_dir=$(find "$work/reuse/results" -mindepth 1 -maxdepth 1 -type d)
+jq -e '.eligible == true and (.imported | length) == 8 and (.rejected | length) == 0' \
+  "$reuse_dir/baseline_reuse.json" >/dev/null
+[[ $(find "$reuse_dir/details" -name 'cascade.json' | wc -l) == 4 ]]
+[[ $(find "$reuse_dir/details" \( -name 'parakeet.json' -o -name 'nemotron.json' \) \
+      -exec jq -e 'has("reused_from") and has("baseline_component_fingerprints")' {} \; | wc -l) == 8 ]]
+[[ -z $(find "$reuse_dir" -type f -name '.*' -print -quit) ]]
+
+# A pair-audio mismatch rejects only that pair's copied baseline details and
+# automatically executes real (fake-backend) baselines for it.
+cp -a "$run_dir" "$work/audio-source"
+cp "$work/pass/cache"/*/manifest.json "$work/audio-source-cache.json"
+jq '.pairs[0].audio_sha256 = ("0" * 64)' "$work/audio-source-cache.json" \
+  >"$work/audio-source-cache.tmp"
+mv "$work/audio-source-cache.tmp" "$work/audio-source-cache.json"
+jq --arg path "$work/audio-source-cache.json" '.pair_cache_manifest = $path' \
+  "$work/audio-source/run_manifest.json" >"$work/audio-source/run_manifest.tmp"
+mv "$work/audio-source/run_manifest.tmp" "$work/audio-source/run_manifest.json"
+run_fake pass "$work/audio-mismatch" --cache-root "$work/pass/cache" \
+  --reuse-baselines-from "$work/audio-source" >"$work/audio-mismatch.out"
+audio_mismatch_dir=$(find "$work/audio-mismatch/results" -mindepth 1 -maxdepth 1 -type d)
+jq -e '(.imported | length) == 6 and (.rejected | length) == 2
+  and ([.rejected[].reason] | all(contains("audio digest mismatch")))' \
+  "$audio_mismatch_dir/baseline_reuse.json" >/dev/null
+[[ $(find "$audio_mismatch_dir/details/test-clean/test-clean-pair-001" \
+      \( -name 'parakeet.json' -o -name 'nemotron.json' \) \
+      -exec jq -e 'has("reused_from") | not' {} \; | wc -l) == 2 ]]
+
+# Model and byte-level runtime-component changes reject all imports and fall
+# back automatically without turning the bounded run into an error.
+sed 's/e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b7f4d32e/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+  "$repo_root/manifests/models.lock" >"$work/models-mismatch.lock"
+NATIVE_ASR_MODEL_MANIFEST="$work/models-mismatch.lock" \
+  run_fake pass "$work/model-mismatch" --cache-root "$work/pass/cache" \
+    --reuse-baselines-from "$run_dir" >"$work/model-mismatch.out"
+model_mismatch_dir=$(find "$work/model-mismatch/results" -mindepth 1 -maxdepth 1 -type d)
+jq -e '.eligible == false and (.imported | length) == 0 and (.rejected | length) == 8
+  and (.global_rejection | contains("model artifacts mismatch"))' \
+  "$model_mismatch_dir/baseline_reuse.json" >/dev/null
+
+NATIVE_ASR_TEST_BASELINE_COMPONENT_VARIANT=changed \
+  run_fake pass "$work/runtime-mismatch" --cache-root "$work/pass/cache" \
+    --reuse-baselines-from "$run_dir" >"$work/runtime-mismatch.out"
+runtime_mismatch_dir=$(find "$work/runtime-mismatch/results" -mindepth 1 -maxdepth 1 -type d)
+jq -e '.eligible == false and (.imported | length) == 0 and (.rejected | length) == 8
+  and (.global_rejection | contains("runtime component fingerprints mismatch"))' \
+  "$runtime_mismatch_dir/baseline_reuse.json" >/dev/null
+
 # An exact fingerprint resumes in place without creating another result tree.
 run_fake pass "$work/pass" >"$work/resume.out"
 grep -Fq 'resume: bounded run already complete' "$work/resume.out"
@@ -63,17 +115,28 @@ grep -Fq 'resume: bounded run already complete' "$work/resume.out"
 set +e
 run_fake pilot-fatal "$work/pilot" >"$work/pilot.out" 2>"$work/pilot.err"
 pilot_status=$?
+run_fake pilot-missed-endpoint "$work/pilot-missed" >"$work/pilot-missed.out" 2>"$work/pilot-missed.err"
+pilot_missed_status=$?
+run_fake pilot-extra-endpoints "$work/pilot-extra" >"$work/pilot-extra.out" 2>"$work/pilot-extra.err"
+pilot_extra_status=$?
 run_fake timeout "$work/timeout" --pair-timeout-seconds 0.01 >"$work/timeout.out" 2>"$work/timeout.err"
 timeout_status=$?
 run_fake deadline "$work/deadline" >"$work/deadline.out" 2>"$work/deadline.err"
 deadline_status=$?
 set -e
-[[ $pilot_status == 1 && $timeout_status == 1 && $deadline_status == 1 ]]
+[[ $pilot_status == 1 && $pilot_missed_status == 1 && $pilot_extra_status == 1
+  && $timeout_status == 1 && $deadline_status == 1 ]]
 pilot_dir=$(find "$work/pilot/results" -mindepth 1 -maxdepth 1 -type d)
+pilot_missed_dir=$(find "$work/pilot-missed/results" -mindepth 1 -maxdepth 1 -type d)
+pilot_extra_dir=$(find "$work/pilot-extra/results" -mindepth 1 -maxdepth 1 -type d)
 timeout_dir=$(find "$work/timeout/results" -mindepth 1 -maxdepth 1 -type d)
 deadline_dir=$(find "$work/deadline/results" -mindepth 1 -maxdepth 1 -type d)
 jq -e '.phase == "pilot" and .pass == false' "$pilot_dir/verdict.json" >/dev/null
 [[ $(find "$pilot_dir/details" -name '*.json' | wc -l) == 1 ]]
+jq -e '.failure.kind == "endpoint_contract"' "$pilot_missed_dir/verdict.json" >/dev/null
+jq -e '.failure.kind == "over_segmentation" and .extra_endpoint_pairs == 1' \
+  "$pilot_extra_dir/verdict.json" >/dev/null
+[[ $(find "$pilot_extra_dir/details" -name '*.json' | wc -l) == 1 ]]
 jq -e '.failure.kind == "ModeTimeout"' "$timeout_dir/verdict.json" >/dev/null
 jq -e '.phase == "deadline" and .failed_guardrails == ["overall_deadline"]' \
   "$deadline_dir/verdict.json" >/dev/null

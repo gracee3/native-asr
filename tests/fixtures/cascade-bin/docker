@@ -31,7 +31,7 @@ event() {
 }
 
 started='{"models":["nemo:nemotron-streaming-en","nemo:parakeet-tdt-v3"],
-  "chunk_milliseconds":20,"endpointing":{"kind":"token_silence","silence_milliseconds":800},
+  "chunk_milliseconds":20,"endpointing":{"kind":"token_silence","silence_milliseconds":1200},
   "paced":false}'
 if printf '%s\n' "$*" | grep -Fq -- '--pace'; then
   started=${started/false/true}

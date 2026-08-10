@@ -29,8 +29,9 @@ The repository-owned native adapter loads both NeMo-Speech.cpp recognizers
 exactly once in one CPU process. It feeds normalized 16 kHz mono audio to
 Nemotron in exact 320-sample (20 ms) chunks and requests genuine interim
 results and word offsets. Upstream token-silence endpointing is explicitly
-enabled at its 800 ms default. `--pace` sleeps between chunks to reproduce the
-source cadence; without it, the same chunks run as quickly as inference allows.
+enabled at a fixed 1,200 ms threshold. `--pace` sleeps between chunks to
+reproduce the source cadence; without it, the same chunks run as quickly as
+inference allows.
 
 Only a natural token-silence endpoint or EOF finalizes a segment. There are no
 microphone inputs, forced-duration cuts, overlap windows, confidence gates,
@@ -147,12 +148,21 @@ digest, reference, duration, and boundary manifest live under
 `$NATIVE_ASR_CACHE/cascade-bounded/`, outside the repository.
 
 The runner first executes five unpaced cascade-only pilot pairs from each
-split. A fatal runtime, event/metric/provenance error, or model-load-count
-mismatch stops the pilot immediately. Only a passing pilot proceeds to all 50
-pairs per split, with each pair evaluated by the cascade, whole-recording
+split. A fatal runtime, event/metric/provenance error, model-load-count
+mismatch, missed inserted-gap endpoint, or widespread extra endpointing stops
+the pilot. Only a passing pilot proceeds to all 50 pairs per split, with each
+pair evaluated by the cascade, whole-recording
 Parakeet TDT, and whole-recording Nemotron in that order. Each mode and pair is
 atomically checkpointed, and resume accepts only the exact cache, image,
 model, adapter, Git, and option fingerprint.
+
+`--reuse-baselines-from RUN_DIR` can import successful whole-recording
+Parakeet and Nemotron details from an earlier bounded run. Reuse requires the
+same cache and pair fingerprints, audio digests, model artifacts,
+normalization, baseline options, and one-load contract. The runner also hashes
+the NeMo CLI, every native library linked by it, and GNU time in both images;
+any mismatch reruns that baseline. Imported records retain their original
+timing and provenance and identify the immutable source run explicitly.
 
 The pair gate enforces the provisional-update, segment, silence, fallback, and
 relative-WER limits recorded in `pair_gate.json`. Only a passing pair gate can

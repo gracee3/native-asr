@@ -36,6 +36,7 @@ jq -e '
   and (.provenance.adapter_sha256 | length == 64)
   and .counts.segments == 2
   and .counts.parakeet_segments == 2
+  and .policy.endpointing == {"kind":"token_silence","silence_milliseconds":1200}
   and .artifacts.events == "events.jsonl"
 ' "$bundle/result.json" >/dev/null
 [[ $(< "$bundle/transcript.txt") == 'first accurate second accurate' ]]
@@ -43,6 +44,7 @@ jq -e '.segments | length == 2
   and .[0].authoritative.selection == "parakeet"
   and .[1].authoritative.words[0].start_seconds == 1.7' "$bundle/segments.json" >/dev/null
 jq -s -e 'length == 9 and .[0].event == "session_started"
+  and .[0].endpointing == {"kind":"token_silence","silence_milliseconds":1200}
   and .[-2].event == "session_metrics" and .[-1].event == "session_completed"
   and ([.[].sequence] == [1,2,3,4,5,6,7,8,9])' "$bundle/events.jsonl" >/dev/null
 grep -Fq 'fake cascade diagnostic' "$bundle/logs/runtime.stderr.log"

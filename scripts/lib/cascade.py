@@ -29,6 +29,11 @@ NEMOTRON_ALIAS = "nemo:nemotron-streaming-en"
 PARAKEET_ALIAS = "nemo:parakeet-tdt-v3"
 MODEL_ALIASES = (NEMOTRON_ALIAS, PARAKEET_ALIAS)
 IMAGE = "asr-nemo-speech"
+ENDPOINT_SILENCE_MILLISECONDS = 1_200
+ENDPOINT_POLICY = {
+    "kind": "token_silence",
+    "silence_milliseconds": ENDPOINT_SILENCE_MILLISECONDS,
+}
 TIME_RE = re.compile(
     r"^NATIVE_ASR_TIME\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$", re.MULTILINE
 )
@@ -169,7 +174,10 @@ class EventValidator:
             return
         if not isinstance(words, list):
             raise ValueError("transcript words must be an array")
-        prior = start
+        # Nemotron's native EOS flush may place the first absolute word just
+        # before the endpointed segment boundary. When bounds are disabled,
+        # timestamp ordering starts at zero rather than at that boundary.
+        prior = start if enforce_segment_bounds else 0.0
         for word in words:
             if not isinstance(word, dict) or not isinstance(word.get("word"), str):
                 raise ValueError("transcript word must carry text")
@@ -309,7 +317,7 @@ class EventValidator:
             if event.get("models") != list(MODEL_ALIASES):
                 raise ValueError("cascade model pair changed")
             endpoint = event.get("endpointing")
-            if endpoint != {"kind": "token_silence", "silence_milliseconds": 800}:
+            if endpoint != ENDPOINT_POLICY:
                 raise ValueError("cascade endpoint policy changed")
             if event.get("chunk_milliseconds") != 20 or not isinstance(event.get("paced"), bool):
                 raise ValueError("cascade chunk or pacing policy is malformed")
@@ -659,7 +667,7 @@ class CascadeJob:
                     "emitted_monotonic_seconds": max(0.0, elapsed),
                     "audio_position_seconds": self.validator.last_audio_position,
                     "models": list(MODEL_ALIASES), "chunk_milliseconds": 20,
-                    "endpointing": {"kind": "token_silence", "silence_milliseconds": 800},
+                    "endpointing": ENDPOINT_POLICY,
                     "paced": self.pace, "origin": "host_recovery",
                 }
                 self.validator.accept(started)
@@ -704,7 +712,7 @@ class CascadeJob:
             },
             "policy": {
                 "model_pair_fixed": True, "chunk_milliseconds": 20,
-                "endpointing": {"kind": "token_silence", "silence_milliseconds": 800},
+                "endpointing": ENDPOINT_POLICY,
                 "pacing": "real_time" if self.pace else "unpaced",
                 "segment_boundary": "natural_endpoint_or_eof",
                 "pass_two": "synchronous_exact_endpoint_slice",
