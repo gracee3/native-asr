@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -n ${NATIVE_ASR_TEST_DOCKER_LOG:-} ]]; then
+  printf '%s\n' "$*" >> "$NATIVE_ASR_TEST_DOCKER_LOG"
+fi
+if [[ ${1:-} == image && ${2:-} == inspect ]]; then
+  printf 'sha256:test-%s\n' "${3//[^A-Za-z0-9]/-}"
+  exit 0
+fi
+
+image=''
+for argument in "$@"; do
+  case $argument in
+    asr-nemo-speech|asr-sherpa-onnx|asr-whisper-cpp|asr-moonshine)
+      image=$argument
+      ;;
+  esac
+done
+[[ -n $image ]]
+
+if [[ ${NATIVE_ASR_TEST_DELAY_IMAGE:-} == "$image" ]]; then
+  : > "${NATIVE_ASR_TEST_STARTED:?}"
+  sleep "${NATIVE_ASR_TEST_DELAY_SECONDS:-30}"
+fi
+if [[ ${NATIVE_ASR_TEST_FAIL_IMAGE:-} == "$image" ]]; then
+  printf 'fake diagnostic: forced failure for %s\n' "$image" >&2
+  printf 'NATIVE_ASR_TIME\t0.20\t0.10\t5000\t7\n' >&2
+  exit 7
+fi
+if [[ ${NATIVE_ASR_TEST_EMPTY_IMAGE:-} == "$image" ]]; then
+  jq -cn '{runtime:"fake-runtime",segmentation:"none",text:""}'
+  printf 'fake diagnostic: empty hypothesis for %s\n' "$image" >&2
+  printf 'NATIVE_ASR_TIME\t0.20\t0.10\t5000\t0\n' >&2
+  exit 0
+fi
+
+case $image in
+  asr-nemo-speech)
+    jq -cn '{runtime:"nemo-speech",segmentation:"native-full-utterance",
+      text:"Hello, brave world.",words:[
+        {word:"Hello",start:0.0,end:0.3,confidence:0.99},
+        {word:"brave",start:0.4,end:0.7,confidence:0.98},
+        {word:"world",start:0.8,end:1.2,confidence:0.97}]}'
+    ;;
+  asr-sherpa-onnx)
+    jq -cn '{runtime:"sherpa-onnx",segmentation:"silero-vad",text:"Hello world.",
+      segments:[{start:0.0,end:1.25,text:"Hello world."}]}'
+    ;;
+  asr-whisper-cpp)
+    jq -cn '{runtime:"whisper-cpp",segmentation:"native-windowing",
+      text:"Hello, brave world!",raw:{transcription:[{text:"Hello, brave world!",
+      timestamps:{from:"00:00:00.000",to:"00:00:01.250"}}]}}'
+    ;;
+  *) exit 9 ;;
+esac
+printf 'fake diagnostic: completed %s\n' "$image" >&2
+printf 'NATIVE_ASR_TIME\t0.20\t0.10\t5000\t0\n' >&2

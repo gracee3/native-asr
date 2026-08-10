@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-ensemble-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+models=$work/models
+manifest=$work/models.lock
+mkdir -p "$models/nemo-speech" "$models/sherpa-onnx" "$models/whisper-cpp"
+: > "$models/nemo-speech/model.gguf"
+: > "$models/sherpa-onnx/model.onnx"
+: > "$models/whisper-cpp/model.bin"
+: > "$work/input.wav"
+cat > "$manifest" <<'EOF'
+nemo-test|nemo:parakeet-tdt-v3|nemo-speech|Test NeMo|https://invalid.example/nemo|test-nemo|model.gguf|nemo-speech/model.gguf|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|CC-BY-4.0|file||test
+sherpa-test|sherpa:parakeet-unified-en|sherpa-onnx|Test Sherpa|https://invalid.example/sherpa|test-sherpa|model.onnx|sherpa-onnx/model.onnx|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|CC-BY-4.0|file||test
+whisper-test|whisper:small.en|whisper-cpp|Test Whisper|https://invalid.example/whisper|test-whisper|model.bin|whisper-cpp/model.bin|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|MIT|file||test
+EOF
+
+export PATH="$repo_root/tests/fixtures/ensemble-bin:$PATH"
+export NATIVE_ASR_CONTAINER_ENGINE=docker
+export NATIVE_ASR_MODELS=$models
+export NATIVE_ASR_MODEL_MANIFEST=$manifest
+export NATIVE_ASR_TEST_DOCKER_LOG=$work/docker.log
+
+bundle=$work/default-bundle
+stdout=$("$repo_root/scripts/ensemble" --output "$bundle" "$work/input.wav" 2> "$work/default.stderr")
+[[ $stdout == 'Hello, brave world.' ]]
+jq -e '
+  .status == "complete"
+  and .text == "Hello, brave world."
+  and [.models[].alias] == ["nemo:parakeet-tdt-v3","sherpa:parakeet-unified-en","whisper:small.en"]
+  and .models[0].anchor
+  and (.models | all(.status == "complete"))
+  and (.models | all(.container.image_id | startswith("sha256:test-")))
+  and (.provenance.git_revision | length == 40)
+  and (.provenance.adapter_sha256 | length == 64)
+  and .decision_counts.majority_token == 1
+' "$bundle/result.json" >/dev/null
+[[ $(< "$bundle/transcript.txt") == 'Hello, brave world.' ]]
+jq -e '.status == "complete" and (.columns | length == 3)' "$bundle/alignment.json" >/dev/null
+jq -e '.status == "complete" and (.spans | length == 1)' "$bundle/disagreements.json" >/dev/null
+for track in "$bundle"/tracks/*.json; do
+  jq -e '.status == "complete" and (.runtime_result.text | length > 0)
+    and (.normalized_tokens | length > 0)' "$track" >/dev/null
+done
+grep -Fq 'fake diagnostic: completed' "$bundle/logs/01-nemo-parakeet-tdt-v3.stderr.log"
+
+# Publication is invisible until all tracks are complete.
+atomic=$work/atomic-bundle
+export NATIVE_ASR_TEST_DELAY_IMAGE=asr-sherpa-onnx
+export NATIVE_ASR_TEST_DELAY_SECONDS=0.5
+export NATIVE_ASR_TEST_STARTED=$work/atomic.started
+"$repo_root/scripts/ensemble" --output "$atomic" "$work/input.wav" \
+  > "$work/atomic.stdout" 2> "$work/atomic.stderr" &
+atomic_pid=$!
+for _ in $(seq 1 100); do [[ -e $NATIVE_ASR_TEST_STARTED ]] && break; sleep 0.02; done
+[[ -e $NATIVE_ASR_TEST_STARTED ]]
+[[ ! -e $atomic ]]
+wait "$atomic_pid"
+[[ -f $atomic/result.json ]]
+unset NATIVE_ASR_TEST_DELAY_IMAGE NATIVE_ASR_TEST_DELAY_SECONDS NATIVE_ASR_TEST_STARTED
+
+# Explicit model order controls both the anchor and display-form preference.
+ordered=$work/ordered-bundle
+ordered_stdout=$("$repo_root/scripts/ensemble" --output "$ordered" \
+  --model whisper:small.en --model nemo:parakeet-tdt-v3 \
+  --model sherpa:parakeet-unified-en "$work/input.wav" 2> "$work/ordered.stderr")
+[[ $ordered_stdout == 'Hello, brave world!' ]]
+jq -e '.models[0].alias == "whisper:small.en" and .models[0].anchor
+  and .models[1].alias == "nemo:parakeet-tdt-v3"' "$ordered/result.json" >/dev/null
+
+# A started runtime failure publishes evidence but no authoritative transcript.
+failed=$work/failed-bundle
+export NATIVE_ASR_TEST_FAIL_IMAGE=asr-whisper-cpp
+set +e
+"$repo_root/scripts/ensemble" --output "$failed" "$work/input.wav" \
+  > "$work/failed.stdout" 2> "$work/failed.stderr"
+failed_status=$?
+set -e
+unset NATIVE_ASR_TEST_FAIL_IMAGE
+[[ $failed_status == 1 && -d $failed && ! -e $failed/transcript.txt ]]
+jq -e '.status == "failed" and .failure.model_alias == "whisper:small.en"
+  and .models[0].status == "complete" and .models[2].status == "failed"' \
+  "$failed/result.json" >/dev/null
+grep -Fq 'forced failure' "$failed/logs/03-whisper-small-en.stderr.log"
+
+# Exit-zero empty output is also a strict started-job failure.
+empty=$work/empty-bundle
+export NATIVE_ASR_TEST_EMPTY_IMAGE=asr-sherpa-onnx
+set +e
+"$repo_root/scripts/ensemble" --output "$empty" "$work/input.wav" \
+  > "$work/empty.stdout" 2> "$work/empty.stderr"
+empty_status=$?
+set -e
+unset NATIVE_ASR_TEST_EMPTY_IMAGE
+[[ $empty_status == 1 && -d $empty && ! -e $empty/transcript.txt ]]
+jq -e '.status == "failed" and .failure.model_alias == "sherpa:parakeet-unified-en"
+  and (.failure.message | contains("empty"))' "$empty/result.json" >/dev/null
+
+# Existing destinations are validation errors and are never modified.
+existing=$work/existing
+mkdir "$existing"
+printf '%s\n' sentinel > "$existing/keep"
+set +e
+"$repo_root/scripts/ensemble" --output "$existing" "$work/input.wav" \
+  > "$work/existing.stdout" 2> "$work/existing.stderr"
+existing_status=$?
+set -e
+[[ $existing_status == 2 && $(< "$existing/keep") == sentinel ]]
+
+# Cancellation terminates the active process group and publishes a cancelled audit.
+cancelled=$work/cancelled-bundle
+export NATIVE_ASR_TEST_DELAY_IMAGE=asr-sherpa-onnx
+export NATIVE_ASR_TEST_DELAY_SECONDS=30
+export NATIVE_ASR_TEST_STARTED=$work/cancelled.started
+"$repo_root/scripts/ensemble" --output "$cancelled" "$work/input.wav" \
+  > "$work/cancelled.stdout" 2> "$work/cancelled.stderr" &
+cancelled_pid=$!
+for _ in $(seq 1 100); do [[ -e $NATIVE_ASR_TEST_STARTED ]] && break; sleep 0.02; done
+[[ -e $NATIVE_ASR_TEST_STARTED ]]
+kill -TERM "$cancelled_pid"
+set +e
+wait "$cancelled_pid"
+cancelled_status=$?
+set -e
+unset NATIVE_ASR_TEST_DELAY_IMAGE NATIVE_ASR_TEST_DELAY_SECONDS NATIVE_ASR_TEST_STARTED
+[[ $cancelled_status == 130 && -d $cancelled && ! -e $cancelled/transcript.txt ]]
+jq -e '.status == "cancelled" and .models[0].status == "complete"
+  and .models[1].status == "cancelled"' "$cancelled/result.json" >/dev/null
+
+# The bundle stays private after atomic rename.
+while IFS= read -r mode; do [[ $mode == 700 ]]; done < <(find "$bundle" -type d -printf '%m\n')
+while IFS= read -r mode; do [[ $mode == 600 ]]; done < <(find "$bundle" -type f -printf '%m\n')
+
+printf '%s\n' 'ensemble integration smoke: ok'

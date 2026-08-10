@@ -1,9 +1,9 @@
-# Future Ensemble and Reconstruction Design
+# Ensemble Reconstruction and Future Scheduling
 
-This document records the current design direction for optional multi-model ASR
-and local-LLM-assisted reconstruction. It is future work and does not expand the
-current implementation scope. The first target is recorded, long-form audio;
-streaming adaptation remains a later phase.
+The deterministic three-model, recorded-audio milestone is now implemented;
+see [`ensemble.md`](ensemble.md) for its command and audit contract. This
+document records the remaining direction for local-LLM-assisted reconstruction,
+concurrent scheduling, persistent workers, and streaming adaptation.
 
 ## Objective and trust boundary
 
@@ -151,13 +151,14 @@ native partial callbacks through the shared adapter. Streaming ensemble work
 therefore requires a stable stateful runtime interface before scheduling policy
 can be validated.
 
-## Initial implementation posture
+## Implementation status and next posture
 
-The first implementation should favor measurable correctness over concurrency:
+The initial implementation now provides the first three items below. Remaining
+work should continue to favor measurable correctness over concurrency:
 
-1. preserve raw per-model outputs and provenance;
-2. define common time-addressed segments and deterministic alignment;
-3. implement consensus and disagreement localization without an LLM;
+1. **Implemented:** preserve raw per-model outputs and provenance;
+2. **Implemented:** define truthful native timing spans and deterministic alignment;
+3. **Implemented:** consensus and disagreement localization without an LLM;
 4. add bounded local-LLM adjudication behind an optional flag;
 5. measure persistent model loads, sequential RTF, aggregate memory, and change
    provenance; and

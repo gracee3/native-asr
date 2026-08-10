@@ -231,6 +231,25 @@ Audio normalization uses a temporary 16 kHz mono PCM16 WAV and never modifies
 the original recording. `--language`, `--output`, `--vad`, and `--stream` are
 available through the script without expanding the simple Just recipe.
 
+## Deterministic three-model ensemble
+
+Run the default English CPU ensemble sequentially and publish a private,
+provenance-complete audit directory:
+
+```bash
+just ensemble recording.m4a recording.audit
+```
+
+The command verifies all models before inference, uses NeMo Parakeet TDT as the
+default alignment anchor, applies deterministic 2-of-3 token/deletion
+consensus, prints the final text, and never overwrites the explicit output
+path. Successful bundles contain `transcript.txt`, exact runtime tracks,
+alignment and disagreement records, stderr logs, timing, image IDs, artifact
+digests, and adapter/Git fingerprints. Failed or cancelled started jobs retain
+their evidence but do not publish an authoritative transcript. See
+[`docs/ensemble.md`](docs/ensemble.md) for ordering overrides, exit statuses,
+alignment rules, timing semantics, and the complete artifact contract.
+
 ## Benchmarking
 
 Append a provenance-rich JSONL result and print a concise summary:
@@ -309,8 +328,9 @@ packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).
 - [`docs/architecture.md`](docs/architecture.md) — layer boundaries and image invariants
 - [`docs/models.md`](docs/models.md) — lockfile and on-disk model contract
 - [`docs/benchmarking.md`](docs/benchmarking.md) — benchmark and accuracy metadata contract
+- [`docs/ensemble.md`](docs/ensemble.md) — deterministic consensus command and audit contract
 - [`docs/reproducibility-report.md`](docs/reproducibility-report.md) — validated images, run IDs, and current limitations
-- [`docs/future-ensemble-reconstruction.md`](docs/future-ensemble-reconstruction.md) — deferred ensemble, scheduling, and local-LLM direction
+- [`docs/future-ensemble-reconstruction.md`](docs/future-ensemble-reconstruction.md) — deferred LLM, concurrency, and streaming direction
 - [`docs/future-rust-tui.md`](docs/future-rust-tui.md) — deferred terminal UI and event-protocol direction
 
 Private recordings, transcripts, downloaded weights, and local benchmark
