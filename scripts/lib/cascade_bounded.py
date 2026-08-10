@@ -31,7 +31,7 @@ from evaluation import NORMALIZATION_VERSION, errors, normalize
 
 
 SCHEMA_VERSION = 1
-RECIPE_VERSION = "cascade-bounded-pcm16-pairs-v2"
+RECIPE_VERSION = "cascade-bounded-pcm16-pairs-v1"
 SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
