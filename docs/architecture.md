@@ -63,12 +63,14 @@ The default builds target portable modern x86-64 CPUs. They do not use
 `-march=native`. A separately named host-native profile can be added only after
 portable behavior and benchmark comparability are established.
 
-## Batch and streaming
+## Long-form and streaming
 
-Recorded, long-form transcription remains supported. Offline models use
-upstream-supported VAD or explicit chunking rather than a silent monolithic
-request. The current interactive product path is the T14-local English
-Nemotron-to-Parakeet cascade specified in `docs/interactive-cascade.md`.
+The repository exposes two supported products over the same runtime boundary.
+The long-form path runs three complete model tracks sequentially and produces a
+deterministic consensus audit. Offline models use upstream-supported VAD or
+explicit chunking rather than a silent monolithic request. The interactive
+path is the T14-local English Nemotron-to-Parakeet cascade specified in
+`docs/interactive-cascade.md`.
 
 The cascade adds a native supervisor and stable-C-ABI worker to the existing
 NeMo image. Host PipeWire capture or file decoding writes 16 kHz mono float PCM

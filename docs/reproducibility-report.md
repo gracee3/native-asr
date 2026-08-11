@@ -9,6 +9,29 @@ ThinkPad T14 i5-1145G7 with 15 GiB RAM is the sole development and acceptance
 host for the Nemotron-to-Parakeet cascade. Reviewed T14 cascade aggregates are
 recorded below; raw event logs remain outside Git.
 
+## Current long-form ensemble baseline
+
+The current deterministic consensus implementation is replayed in repository
+tests over the three default tracks in the published 2026-08-09 100-utterance
+snapshot. It produces byte-identical repeated hypotheses and improves on the
+best constituent in both splits:
+
+| Split | Consensus errors / words | Consensus WER | Best constituent errors / words |
+|---|---:|---:|---:|
+| `test-clean` | 37 / 2,084 | 1.78% | 42 / 2,084 |
+| `test-other` | 54 / 1,645 | 3.28% | 59 / 1,645 |
+
+Those WERs are derived by aligning the exact published NeMo Parakeet, Sherpa
+Parakeet, and whisper.cpp hypotheses per utterance. They are deterministic
+snapshot/regression evidence, not a separately timed continuous-audio run.
+
+The default command executes the three model passes sequentially. Summing their
+published constituent RTFs gives `0.162 + 0.131 + 0.615 = 0.908` for
+`test-clean` and `0.162 + 0.136 + 0.824 = 1.122` for `test-other`. The README
+therefore reports an approximate 0.91-1.12 long-form RTF, before alignment and
+audit publication overhead. These are historical i7 planning estimates; a
+complete end-to-end T14 ensemble measurement remains a roadmap item.
+
 ## 2026-08-10/11 accepted T14 interactive cascade
 
 The CPU-only interactive cascade passed on an 11th Gen Intel Core i5-1145G7

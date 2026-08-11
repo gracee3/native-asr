@@ -74,6 +74,22 @@ models/
 
 Do not move downloaded files into `docker/` or any other build-context path.
 
+## Long-form model roles
+
+The default recorded-audio ensemble uses three deliberately different native
+paths:
+
+- `nemo:parakeet-tdt-v3` is the alignment anchor and fallback for unresolved
+  three-way disagreements;
+- `sherpa:parakeet-unified-en` supplies an independently packaged Parakeet
+  hypothesis with production long-form VAD handling; and
+- `whisper:small.en` supplies a different model and runtime family.
+
+All three transcribe the complete recording sequentially. The ensemble aligns
+their lexical hypotheses and accepts deterministic 2-of-3 token or deletion
+votes. The model order can be overridden, but exactly three distinct aliases
+are required and the first always becomes the anchor.
+
 ## Interactive model roles
 
 The accepted English interactive path uses exactly two NeMo models from the
@@ -86,7 +102,8 @@ read-only tree above:
   finalized phrase is decoded natively through the pinned stable C ABI; an
   empty result receives one bounded silence-only flush retry.
 
-`nemo:nemotron-3.5-streaming` remains a later multilingual option. The
-three-model recorded-audio ensemble is independent of this pair and is not in
-the interactive critical path. No role changes the storage rule: every GGUF
-stays host-managed and is mounted read-only rather than copied into an image.
+`nemo:nemotron-3.5-streaming` remains a later multilingual option. The two
+workflows share the Parakeet artifact but not a scheduler: the three-model
+recorded-audio ensemble is never called from the interactive critical path. No
+role changes the storage rule: every weight file stays host-managed and is
+mounted read-only rather than copied into an image.

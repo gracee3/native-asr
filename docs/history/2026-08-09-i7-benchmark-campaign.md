@@ -5,7 +5,7 @@
 > acceptance plan. Published results remain labeled i7 snapshots. The ThinkPad
 > T14 i5-1145G7 with 15 GiB RAM is the sole current development and validation
 > host; its interactive cascade contract is in
-> `docs/interactive-cascade.md`. Do not resume this campaign as part of cascade
+> [`interactive-cascade.md`](../interactive-cascade.md). Do not resume this campaign as part of cascade
 > acceptance.
 
 This is the operational handoff for the agent running the completed native-ASR

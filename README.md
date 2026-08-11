@@ -1,250 +1,120 @@
 # native-asr
 
-`native-asr` is a CPU-first, fully offline speech-recognition toolkit for
-recorded audio and streaming experiments. It packages lightweight native
-inference runtimes separately from model weights and user audio.
+Offline, CPU-only speech recognition for long recordings and live English
+transcription. `native-asr` provides two complete workflows on ordinary x86-64
+Linux hardware:
 
-The central rule is simple:
+- a deterministic three-model ensemble for accurate, auditable long-form
+  transcripts; and
+- a low-latency Nemotron-to-Parakeet cascade for provisional and committed
+  streaming text.
 
-> Runtime images are redistributable tooling; model weights stay external on
-> the host.
+Inference is local. Containers run without network access, model weights remain
+on the host, and source recordings are mounted read-only.
 
-No Dockerfile may copy, download, or embed a model. Model acquisition is an
-explicit host-side operation, model directories are mounted read-only at
-`/models`, and inference containers run with networking disabled.
+## Choose a workflow
 
-## Status
+| | Long-form ensemble | Interactive cascade |
+|---|---|---|
+| Best for | Interviews, meetings, lectures, archival recordings | Live captions, dictation, interactive applications |
+| Models | NeMo Parakeet + Sherpa Parakeet + whisper.cpp | Nemotron streaming + NeMo Parakeet |
+| Result | One deterministic 2-of-3 consensus transcript | Provisional text followed by authoritative phrase commits |
+| Execution | Three sequential offline passes | Two persistent native workers |
+| Output | Private, provenance-complete audit bundle | Terminal text or canonical JSONL; audit is optional |
 
-Four pinned native CPU runtimes, nine ASR aliases, locked public evaluation
-corpora, stateful streaming adapters, and reproducible WER/performance suites
-share one model-free, network-disabled container interface.
+### Approximate accuracy and speed
 
-The current development direction is an English CPU-only interactive cascade on
-the ThinkPad T14 (i5-1145G7, 15 GiB): NeMo Nemotron provides provisional phrase
-text and NeMo Parakeet TDT v3 authoritatively re-decodes each endpointed phrase.
-The design and acceptance contract are recorded in
-[`docs/interactive-cascade.md`](docs/interactive-cascade.md). The native worker,
-supervisor, genuine partial stream, terminal/JSONL interfaces, private audit
-bundle, and T14 gates are complete. Both paced 100-utterance phrase fixtures
-passed with zero degradations and committed WER below Nemotron.
+Lower is better for both word error rate (WER) and real-time factor (RTF). An
+RTF of `1.0` keeps pace with the audio; `0.5` processes it at about twice real
+time.
 
-The deterministic 100-utterance gate is complete for all nine aliases on both
-LibriSpeech splits: 18/18 runs completed with zero failures. A lower-commitment
-full-corpus checkpoint is also complete for Sherpa Parakeet and NeMo Parakeet
-TDT v3 on all 2,620 `test-clean` utterances. Those are two of the intended
-eight full-split finalist cells; the other six and the final streaming matrix
-remain pending.
+| Workflow | LibriSpeech `test-clean` WER | LibriSpeech `test-other` WER | Approximate RTF |
+|---|---:|---:|---:|
+| Long-form three-model ensemble | 1.78% | 3.28% | 0.91-1.12 sequential |
+| Interactive committed text | 4.61% | 5.56% | 1.00 paced; 0.42-0.44 unpaced |
 
-## Validated benchmark snapshot
+These are engineering baselines, not universal accuracy claims. The ensemble
+WER comes from deterministic 100-utterance snapshots; its RTF is the sum of the
+three sequential model passes on the historical i7 benchmark host and excludes
+small alignment/audit overhead. The interactive results use separate
+endpoint-sized 100-utterance fixtures on the T14. The two WER rows therefore
+describe their intended workloads and are not a head-to-head comparison. Full
+provenance and limitations are in the
+[reproducibility report](docs/reproducibility-report.md).
 
-These are historical i7 SHA-256-ranked 100-utterance gate results from
-2026-08-09, not a claimed full-split ranking or current T14 acceptance evidence.
-Every cell used the same clean Git revision
-`797eb65`, locked artifacts, `english-upper-apostrophe-v1` WER normalization,
-and CPU-only containers on an Intel Core i7-1185G7 (4 cores / 8 threads,
-31.1 GiB RAM).
+## Long-form: three-model consensus
 
-| Model | `test-clean` WER | `test-other` WER | `test-clean` RTF | `test-other` RTF | Max RSS GiB |
-|---|---:|---:|---:|---:|---:|
-| `sherpa:parakeet-unified-en` | 4.46% | 3.59% | 0.131 | 0.136 | 3.50 |
-| `sherpa:canary-180m-flash` | 7.25% | 4.07% | 0.101 | 0.108 | 0.70 |
-| `sherpa:nemotron-streaming-en` | 6.38% | 9.73% | 0.112 | 0.116 | 6.85 |
-| `nemo:parakeet-tdt-v3` | 2.02% | 4.26% | 0.162 | 0.162 | 0.91 |
-| `nemo:nemotron-streaming-en` | 2.59% | 6.26% | 0.297 | 0.322 | 0.92 |
-| `nemo:nemotron-3.5-streaming` | 4.17% | 9.67% | 0.334 | 0.320 | 0.92 |
-| `nemo:parakeet-ctc-1.1b` | 2.45% | 4.13% | 0.280 | 0.276 | 1.50 |
-| `moonshine:small-streaming-en` | 6.33% | 14.10% | 0.297 | 0.298 | 0.67 |
-| `whisper:small.en` | 2.88% | 7.29% | 0.615 | 0.824 | 0.74 |
-
-Lower is better for both WER and RTF; RTF below `1.0` is faster than real time.
-RTF is batch wall time divided by audio duration and excludes the separately
-recorded cold-start probe. Max RSS is the larger in-container peak from the two
-rows. Runtime-specific, fingerprinted batching policies are part of every run,
-so this small gate is best read as failure/regression coverage. Exact run IDs,
-image IDs, policies, and limitations are in the
-[`reproducibility report`](docs/reproducibility-report.md).
-The exact 18 summary records and their 1,800 per-utterance detail records are
-published in the
-[`2026-08-09 benchmark snapshot`](benchmarks/published/2026-08-09-librispeech-100/README.md).
-
-## Initial validated full-split checkpoint
-
-These are the first two complete `test-clean` finalist cells, not a ranking of
-all four finalists. Both used the same 2,620-utterance, 5.403-hour manifest,
-clean Git revision `44f2eaf`, locked artifacts, CPU-only containers, and the
-same normalization and host described above. Every utterance detail row
-validated with zero runtime failures.
-
-| Model | WER | S / D / I | RTF | Peak RSS GiB | Model loads | Run ID |
-|---|---:|---:|---:|---:|---:|---|
-| `sherpa:parakeet-unified-en` | 2.12% | 809 / 206 / 101 | 0.141 | 3.66 | 378 | `20260809T210123493196Z-ab7728fffe58` |
-| `nemo:parakeet-tdt-v3` | 2.15% | 915 / 97 / 119 | 0.160 | 0.99 | 1 | `20260809T214700876989Z-7fed3a8f2e1c` |
-
-The Sherpa adapter's fingerprinted v4 policy includes every retry in timing and
-memory accounting; it recursively isolates exit-zero empty groups and uses
-lossless balanced chunks only when the pinned VAD also returns empty. The exact
-two summaries and 5,240 public-corpus detail records are in the
-[`full test-clean checkpoint`](benchmarks/published/2026-08-09-librispeech-test-clean-pair/README.md).
-Interpretation, the rejected pre-fix attempt, and remaining work are documented
-in the [`reproducibility report`](docs/reproducibility-report.md).
-
-## Architecture
+The default ensemble runs three independent full-recording transcriptions:
 
 ```text
-native runtime image       host model directory       host audio
-(no model weights)    +    (read-only /models)   +    (read-only input)
+recording
+   ├── NeMo Parakeet TDT v3        (anchor and fallback)
+   ├── Sherpa Parakeet Unified
+   └── whisper.cpp small.en
+             │
+             ▼
+   deterministic token alignment
+             │
+             ▼
+      2-of-3 consensus transcript
 ```
 
-Large artifacts default to the dedicated `/data` filesystem:
+Two matching token or deletion votes decide each aligned position. A three-way
+disagreement falls back to the NeMo anchor and remains explicitly marked in the
+audit data. No language model silently rewrites agreed text.
 
-```bash
-NATIVE_ASR_MODELS=/data/models
-NATIVE_ASR_CACHE=/data/cache/native-asr
-NATIVE_ASR_DATASETS=/data/datasets/native-asr
-NATIVE_ASR_BENCHMARKS=/data/benchmarks/native-asr/runs.jsonl
-```
-
-Each variable remains an explicit environment override. A checkout-local
-`models` symlink is supported for compatibility.
-
-The directory is never used as a Docker build input. Deleting or rebuilding an
-image therefore does not remove a model or require it to be downloaded again.
-
-## Prerequisites
-
-- Bash, `curl`, `sha256sum`, and standard archive tools for model management;
-- [Just](https://github.com/casey/just) for the primary command interface;
-- Docker for building and running the inference images;
-- an x86-64 Linux CPU for the initial images.
-
-Python, PyTorch, NVIDIA NeMo, and Hugging Face Python libraries are not part of
-the deployed inference path.
-
-## Model management
-
-List the pinned artifacts without downloading them:
-
-```bash
-just list-models
-```
-
-Download one model, all models for a runtime, or every currently locked model:
-
-```bash
-just model sherpa:parakeet-unified-en
-just models-sherpa
-just models-nemo
-just models
-```
-
-Downloads resume in the project cache, are verified against committed SHA-256
-digests, and are installed through same-filesystem staging and atomic rename.
-Verified archives remain cached. Existing valid files are not downloaded again;
-invalid destinations are never overwritten. `HF_TOKEN` is supported, but none
-of the locked artifacts require it.
-
-Verify installed artifacts without network access:
-
-```bash
-just verify-models
-just verify-models sherpa:parakeet-unified-en
-```
-
-The first form verifies everything currently installed and reports models that
-have not been installed. The second requires and verifies the named model.
-
-## Sherpa transcription
-
-Build the pinned sherpa-onnx 1.13.2 / ONNX Runtime 1.24.4 CPU image and fetch a
-model:
-
-```bash
-just build-sherpa
-just model sherpa:canary-180m-flash
-```
-
-Run inference with no container network and read-only model/audio mounts:
-
-```bash
-docker run --rm --network none \
-  -v "${NATIVE_ASR_MODELS:-/data/models}/sherpa-onnx:/models:ro" \
-  -v "$PWD:/work:ro" \
-  asr-sherpa-onnx \
-  transcribe \
-  --model /models/canary-180m-flash-int8 \
-  --format json \
-  /work/recording.m4a
-```
-
-The image normalizes common media formats with FFmpeg, defaults offline models
-to the shared Silero VAD when installed, and emits text or compact JSON. The
-Nemotron model uses Sherpa's true stateful streaming decoder for file input.
-
-## NeMo-Speech.cpp transcription
-
-Build the pinned NeMo-Speech.cpp 1.0.0 CPU image and fetch an official NVIDIA
-Q8 GGUF:
+Build the three native runtime images, fetch the locked models, and transcribe:
 
 ```bash
 just build-nemo
+just build-sherpa
+just build-whisper
+
+just model nemo:parakeet-tdt-v3
+just model sherpa:parakeet-unified-en
+just model whisper:small.en
+
+just ensemble recording.m4a recording.audit
+```
+
+The output directory must not already exist. On success it contains the final
+transcript, all three exact model tracks, alignment decisions, disagreement
+regions, logs, timing, image IDs, and model/source digests. Directories are
+private (`0700`) and files are private (`0600`). See the
+[long-form ensemble contract](docs/ensemble.md).
+
+## Streaming: two-model cascade
+
+The interactive path keeps both models loaded for the session:
+
+```text
+16 kHz mono PCM
+      │
+      ▼
+Nemotron streaming ──► provisional revisions and phrase final
+                                          │
+                                          ▼
+                                Parakeet phrase correction
+                                          │
+                                          ▼
+                                  committed transcript
+```
+
+Nemotron emits genuine incremental text and endpoints phrases after 800 ms of
+token silence by default. Parakeet re-decodes each finalized phrase and becomes
+authoritative when it returns nonempty text within 2.5 seconds. A failure,
+timeout, empty result, or full correction queue commits the Nemotron phrase with
+an explicit degradation reason instead of blocking the stream.
+
+Build the native NeMo image and fetch both models:
+
+```bash
+just build-nemo
+just model nemo:nemotron-streaming-en
 just model nemo:parakeet-tdt-v3
 ```
 
-The image builds only the native CLI and ASR library with its pinned ggml
-submodule. Parakeet TDT v3 and CTC run in full-utterance mode; the two Nemotron
-models use the runtime's cache-aware streaming-file path by default.
-
-The pinned upstream ASR runtime currently fixes ggml compute at four CPU
-threads. The wrapper reports and enforces that value so benchmark metadata does
-not imply a thread count the engine did not use.
-
-## Moonshine and whisper.cpp
-
-Moonshine v0.1.1 uses its native C++ streaming interface and the locked Small
-Streaming English ORT component tree. whisper.cpp v1.9.2 is built CPU-only and
-uses the official F16 `small.en` model plus Silero VAD v6.2.0:
-
-```bash
-just build-moonshine
-just models-moonshine
-just transcribe moonshine:small-streaming-en recording.m4a
-
-just build-whisper
-just models-whisper
-just transcribe whisper:small.en recording.m4a
-```
-
-## Common interface
-
-The runtime-independent path is:
-
-```bash
-just build-sherpa
-just model sherpa:parakeet-unified-en
-just transcribe sherpa:parakeet-unified-en recording.m4a
-```
-
-It verifies the selected artifact, chooses the image and model path from the
-lockfile, mounts models and audio read-only, and always passes `--network none`.
-Containers use the invoking non-root UID/GID so private readable audio does not
-need to be made world-readable; a root caller falls back to the image's
-unprivileged `65532:65532` identity.
-Structured output retains the original absolute host audio path and locked
-artifact provenance:
-
-```bash
-./scripts/transcribe --format json --threads 8 \
-  sherpa:parakeet-unified-en recording.m4a
-```
-
-Audio normalization uses a temporary 16 kHz mono PCM16 WAV and never modifies
-the original recording. `--language`, `--output`, `--vad`, and `--stream` are
-available through the script without expanding the simple Just recipe.
-
-## Interactive cascade
-
-Replay a recording at real-time pace through resident Nemotron and Parakeet
-workers:
+Replay a file at real-time pace:
 
 ```bash
 just cascade-file recording.m4a
@@ -252,134 +122,96 @@ scripts/cascade file recording.m4a --jsonl
 scripts/cascade file recording.m4a --audit recording.audit
 ```
 
-Start live capture only when explicitly intended:
+Start live PipeWire capture only when you intend to activate the microphone:
 
 ```bash
 just cascade-live
 scripts/cascade live --source PIPEWIRE_NODE
 ```
 
-Nemotron provides genuine provisional revisions and phrase finals. An on-time,
-nonempty Parakeet correction is authoritative; a worker failure, timeout,
-empty result, or full correction queue commits Nemotron with an explicit
-degradation reason. The container receives float PCM over standard input, no
-audio device, no network, and a read-only model mount. Persistence is disabled
-unless `--audit` names a nonexistent destination, and raw audio is never saved.
-See [`docs/interactive-cascade.md`](docs/interactive-cascade.md) for the event
-schema, scheduling rules, acceptance fixtures, and reviewed T14 results.
+The default display is a simple terminal viewer. `--jsonl` exposes ordered,
+revision-aware machine events. Persistence is opt-in, audit destinations must
+not exist, and raw microphone audio is never saved. See the
+[interactive cascade contract](docs/interactive-cascade.md).
 
-## Deterministic three-model ensemble
+## Installation and storage
 
-Run the default English CPU ensemble sequentially and publish a private,
-provenance-complete audit directory:
+The initial platform is x86-64 Linux. You need Docker, Bash, FFmpeg, standard
+archive/checksum tools, and [Just](https://github.com/casey/just). Live capture
+also requires PipeWire's `pw-cat` command. Python is used by host orchestration
+and tests, but it is not present in deployed inference images.
 
 ```bash
-just ensemble recording.m4a recording.audit
+git clone https://github.com/gracee3/native-asr.git
+cd native-asr
+just check
 ```
 
-The command verifies all models before inference, uses NeMo Parakeet TDT as the
-default alignment anchor, applies deterministic 2-of-3 token/deletion
-consensus, prints the final text, and never overwrites the explicit output
-path. Successful bundles contain `transcript.txt`, exact runtime tracks,
-alignment and disagreement records, stderr logs, timing, image IDs, artifact
-digests, and adapter/Git fingerprints. Failed or cancelled started jobs retain
-their evidence but do not publish an authoritative transcript. See
-[`docs/ensemble.md`](docs/ensemble.md) for ordering overrides, exit statuses,
-alignment rules, timing semantics, and the complete artifact contract.
-
-## Benchmarking
-
-Append a provenance-rich JSONL result and print a concise summary:
+Large artifacts default to a dedicated `/data` filesystem:
 
 ```bash
-just bench sherpa:parakeet-unified-en recording.m4a
+export NATIVE_ASR_MODELS=/data/models
+export NATIVE_ASR_CACHE=/data/cache/native-asr
+export NATIVE_ASR_DATASETS=/data/datasets/native-asr
+export NATIVE_ASR_BENCHMARKS=/data/benchmarks/native-asr/runs.jsonl
 ```
 
-The timed region includes container startup, normalization, model loading, and
-inference. It excludes prior model checksum verification and image inspection.
-Single-file records and set/suite summaries default to the external benchmark
-store. Dataset runs retain raw and normalized text, use versioned English WER,
-apply a fingerprinted runtime-specific batching policy, and resume only when
-every fingerprint matches:
+All paths are overridable. Downloads are content-verified and atomically
+installed. Model directories are mounted read-only at `/models`; no Dockerfile
+copies or downloads weights, and every inference container uses
+`--network none` and an unprivileged user.
+
+List the complete pinned model catalog without downloading anything:
 
 ```bash
-just datasets
-just prepare-datasets
-just benchmark-set whisper:small.en librispeech-test-clean
-just bench-suite staged
-```
-
-After `just prepare-datasets`, run the complete reviewed matrix with
-clean-tree, stable-power, locking, phase, and result validation gates:
-
-```bash
-just bench-full
-```
-
-The runner honors all `NATIVE_ASR_*` storage overrides and automatically uses
-`systemd-inhibit`, when available, to block sleep for the duration. Set
-`NATIVE_ASR_INHIBIT_SLEEP=0` to opt out or `NATIVE_ASR_SKIP_POWER_CHECK=1` when
-AC/performance-profile detection is unavailable. `just bench-test-clean-pair`
-replays only the two full `test-clean` finalist cells used by the original
-targeted recovery run.
-
-The staged suite evaluates deterministic 100-utterance subsets, the four fixed
-finalists on full LibriSpeech splits, a reproducible five-minute paced stream,
-and the full AMI meeting. AMI is not assigned a misleading overlap-sensitive
-full-meeting WER.
-
-Dataset evaluation uses a fingerprinted batching policy for each runtime.
-Most runtimes reuse one model load across the set; Sherpa Parakeet uses bounded
-groups and routes utterances over 20 seconds through the same pinned Silero VAD
-path used for production long-form transcription. If the upstream CLI exits
-zero with an empty group, the adapter recursively isolates the affected input,
-then tries VAD and finally balanced lossless chunks of at most 10 seconds. All
-fallback processes contribute to wall time, CPU time, peak RSS, and model-load
-counts; nonzero runtime exits are never upgraded to success.
-
-Show the runtime source pins at any time:
-
-```bash
+just list-models
 just versions
 ```
 
-## Initial model set
+## Individual models and benchmarks
 
-| Alias | Role | Runtime form |
-|---|---|---|
-| `sherpa:parakeet-unified-en` | primary English long-form model | INT8 ONNX, offline with VAD |
-| `sherpa:canary-180m-flash` | small multilingual challenger | INT8 ONNX, offline |
-| `sherpa:nemotron-streaming-en` | streaming and cross-runtime comparison | 560 ms INT8 ONNX |
-| `nemo:parakeet-tdt-v3` | authoritative interactive correction and NeMo long-form model | Q8 GGUF, offline |
-| `nemo:nemotron-streaming-en` | English interactive first pass and cross-runtime comparison | Q8 GGUF |
-| `nemo:nemotron-3.5-streaming` | multilingual streaming phase two | Q8 GGUF |
-| `nemo:parakeet-ctc-1.1b` | experimental batch-throughput model | Q8 GGUF |
-| `moonshine:small-streaming-en` | low-latency stateful English model | quantized multi-file ORT tree |
-| `whisper:small.en` | established English accuracy baseline | F16 GGML with Silero VAD |
+The shared dispatcher can run any installed alias directly:
 
-Every URL, upstream revision, digest, license identifier, quantization, and
-packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).
+```bash
+just transcribe nemo:parakeet-tdt-v3 recording.m4a
+just transcribe moonshine:small-streaming-en recording.m4a
+```
+
+The repository also includes locked LibriSpeech/AMI datasets, WER evaluation,
+single-model benchmarks, streaming tests, and staged benchmark runners. These
+are research and reproducibility tools rather than a third end-user workflow:
+
+```bash
+just bench nemo:parakeet-tdt-v3 recording.m4a
+just datasets
+just prepare-datasets
+just benchmark-set whisper:small.en librispeech-test-clean
+```
+
+Detailed nine-model tables, full-split checkpoints, image identities, rejected
+runs, and measurement boundaries live in the documentation and published
+public-corpus snapshots, not in this README.
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — layer boundaries and image invariants
-- [`docs/models.md`](docs/models.md) — lockfile and on-disk model contract
-- [`docs/benchmarking.md`](docs/benchmarking.md) — benchmark and accuracy metadata contract
-- [`docs/ensemble.md`](docs/ensemble.md) — deterministic consensus command and audit contract
-- [`docs/interactive-cascade.md`](docs/interactive-cascade.md) — authoritative T14 interactive design and acceptance gates
-- [`docs/reproducibility-report.md`](docs/reproducibility-report.md) — validated images, run IDs, and current limitations
-- [`docs/future-ensemble-reconstruction.md`](docs/future-ensemble-reconstruction.md) — deferred LLM, concurrency, and streaming direction
-- [`docs/future-rust-tui.md`](docs/future-rust-tui.md) — deferred terminal UI and event-protocol direction
+- [Architecture](docs/architecture.md) — runtime boundaries and container invariants
+- [Long-form ensemble](docs/ensemble.md) — consensus, output, failure, and timing contract
+- [Interactive cascade](docs/interactive-cascade.md) — event protocol, scheduling, and acceptance
+- [Models](docs/models.md) — lockfile, storage, and workflow roles
+- [Benchmarking](docs/benchmarking.md) — WER/RTF definitions and comparison rules
+- [Reproducibility report](docs/reproducibility-report.md) — complete results and limitations
+- [Licensing](docs/licensing.md) — repository and third-party licensing boundaries
+- [Roadmap](docs/roadmap.md) — measured next steps without changing current guarantees
+- [Historical i7 benchmark campaign](docs/history/2026-08-09-i7-benchmark-campaign.md)
 
-Private recordings, transcripts, downloaded weights, and local benchmark
-outputs are ignored by Git and the Docker build context. Curated benchmark
-snapshots derived only from public evaluation corpora may be published under
-`benchmarks/published`; benchmark data remains excluded from runtime images.
+Private recordings, transcripts, downloaded weights, and ordinary local
+benchmark outputs are ignored by Git and the Docker build context. Only reviewed
+snapshots derived from public evaluation corpora belong under
+`benchmarks/published`.
 
 ## License
 
-The original code, tests, and documentation in this repository are licensed
-under the [MIT License](LICENSE). This grant does not relicense upstream native
-runtimes, external model weights, or evaluation datasets. Their licenses and
-exact source revisions are recorded in the lockfiles and retained in built
-images where applicable.
+Original code, tests, and documentation in this repository are available under
+the [MIT License](LICENSE). That grant does not relicense third-party native
+runtimes, model weights, or datasets; consult the [licensing guide](docs/licensing.md)
+and committed lockfiles before redistribution.

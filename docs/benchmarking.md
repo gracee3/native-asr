@@ -91,8 +91,8 @@ The latest engineering, deterministic subset, and initial full-split
 validation, plus the boundary between completed and pending stages, are in
 [`reproducibility-report.md`](reproducibility-report.md).
 
-The exact records behind the README's validated 100-utterance tables are
-versioned in
+The exact records behind the nine-model 100-utterance comparison are versioned
+in
 [`benchmarks/published/2026-08-09-librispeech-100`](../benchmarks/published/2026-08-09-librispeech-100/README.md).
 The initial two-model full `test-clean` records are versioned separately in
 [`benchmarks/published/2026-08-09-librispeech-test-clean-pair`](../benchmarks/published/2026-08-09-librispeech-test-clean-pair/README.md).

@@ -115,6 +115,19 @@ both LibriSpeech splits. The current implementation produces 37/2,084 errors on
 `test-clean` (best constituent: 42) and 54/1,645 on `test-other` (best
 constituent: 59).
 
-Local-LLM adjudication, shared TUI progress events, concurrent inference
-profiles, incremental streaming consensus, persistent ensemble workers, and
-GPU scheduling remain later milestones.
+That is approximately 1.78% and 3.28% WER respectively. These deterministic
+subsets are regression and engineering evidence, not a promise for every
+recording. They contain independent LibriSpeech utterances rather than one
+continuous meeting or interview.
+
+The three default model passes run sequentially. Summing their historical i7
+subset RTFs gives approximately 0.91 on `test-clean` and 1.12 on `test-other`,
+or roughly 55-67 minutes of ASR work for one hour of comparable audio. This is
+a planning estimate before the comparatively small alignment and publication
+overhead, not a measured T14 end-to-end ensemble result. Exact constituent
+records and comparison limits are in the
+[`reproducibility report`](reproducibility-report.md).
+
+Local-LLM adjudication, richer progress events, controlled concurrency,
+persistent ensemble workers, and GPU scheduling remain optional future work;
+see the [`roadmap`](roadmap.md).

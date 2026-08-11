@@ -1,7 +1,7 @@
 # LibriSpeech full `test-clean` pair: 2026-08-09
 
 This directory contains the exact successful records behind the initial
-full-split checkpoint in the repository README:
+full-split checkpoint in `docs/reproducibility-report.md`:
 
 - `runs.jsonl` contains two aggregate records: full
   `librispeech-test-clean` for `sherpa:parakeet-unified-en` and

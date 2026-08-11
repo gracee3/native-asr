@@ -1,7 +1,7 @@
 # LibriSpeech 100-utterance snapshot: 2026-08-09
 
 This directory contains the exact successful records behind the validated
-benchmark table in the repository README:
+nine-model table in `docs/reproducibility-report.md`:
 
 - `runs.jsonl` contains 18 aggregate records: nine model aliases on each of
   `librispeech-test-clean` and `librispeech-test-other`;
@@ -28,7 +28,8 @@ model, use:
   sherpa:parakeet-unified-en librispeech-test-clean
 ```
 
-Repeat that command for the nine aliases and two LibriSpeech splits listed in
-the top-level README to recreate the full 18-cell gate. New results go to the
-external `NATIVE_ASR_BENCHMARKS` ledger and are not silently mixed into this
-reviewed snapshot.
+Repeat that command for the nine aliases and two LibriSpeech splits recorded in
+the [`reproducibility report`](../../../docs/reproducibility-report.md) to
+recreate the full 18-cell gate. New results go to the external
+`NATIVE_ASR_BENCHMARKS` ledger and are not silently mixed into this reviewed
+snapshot.
