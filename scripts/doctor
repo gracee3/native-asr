@@ -32,6 +32,9 @@ docker_bin=${DOCKER_BIN:-docker}
 verify_models_bin=${NATIVE_ASR_VERIFY_MODELS_BIN:-$repo_root/scripts/verify-models}
 pw_cli_bin=${PW_CLI_BIN:-pw-cli}
 pw_record_bin=${PW_RECORD_BIN:-pw-record}
+pw_dump_bin=${PW_DUMP_BIN:-pw-dump}
+cargo_bin=${CARGO_BIN:-cargo}
+tui_bin=${NATIVE_ASR_TUI_BIN:-$repo_root/tui/target/release/native-asr-tui}
 min_free_bytes=${NATIVE_ASR_DOCTOR_MIN_FREE_BYTES:-1073741824}
 failures=0
 
@@ -93,9 +96,16 @@ if [[ $profile == all || $profile == long-form ]]; then
   check_tool bzip2
 fi
 if [[ $profile == all || $profile == streaming ]]; then
+  check_tool "$cargo_bin"
   check_tool "$pw_record_bin"
   check_tool "$pw_cli_bin"
+  check_tool "$pw_dump_bin"
   check_tool timeout
+  if [[ -x $tui_bin ]]; then
+    ok "release TUI $tui_bin"
+  else
+    problem "release TUI $tui_bin (run just build-tui)"
+  fi
 fi
 
 host_arch=$(uname -m 2>/dev/null || true)

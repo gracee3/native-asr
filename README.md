@@ -110,7 +110,28 @@ just setup-streaming
 just doctor streaming
 ```
 
-Replay a file at real-time pace:
+`setup-streaming` also builds the pinned release TUI. Start it only when you
+intend to activate a source:
+
+```bash
+just tui
+```
+
+The TUI enumerates PipeWire sources and requires an explicit selection. It
+shows the exact node name, description, physical/virtual classification, and
+serial, then revalidates that identity immediately before capture. It never
+falls back to the PipeWire default source. Committed text is unmarked, text
+awaiting correction is labeled `… correcting`, active text is labeled
+`~ provisional`, and fallback commits are labeled `! degraded`.
+
+Use arrows or `j`/`k` to select, `r` to refresh, `a` to enter an optional new
+audit destination, and `Enter` or `s` to start. While listening, `s` requests a
+graceful stop. `x` opens a hard-cancellation confirmation. `q` gracefully stops
+an active session and then exits; `Ctrl-C` hard-cancels and exits with status
+130. `Esc` dismisses an editor, confirmation, or completed/failed session.
+
+File replay remains a headless cascade operation; the live-only TUI does not
+browse or replay recordings:
 
 ```bash
 just cascade-file recording.m4a
@@ -118,24 +139,34 @@ scripts/cascade file recording.m4a --jsonl
 scripts/cascade file recording.m4a --audit recording.audit
 ```
 
-Start live PipeWire capture only when you intend to activate the microphone:
+The authoritative headless interface remains available for integrations:
 
 ```bash
 just cascade-live
 scripts/cascade live --source PIPEWIRE_NODE
+scripts/cascade live --source PIPEWIRE_NODE --control-stdin --jsonl
 ```
 
-The default display is a simple terminal viewer. `--jsonl` exposes ordered,
-revision-aware machine events. Persistence is opt-in, audit destinations must
-not exist, and raw microphone audio is never saved. See the
+With `--control-stdin`, EOF before readiness exits successfully without
+activating capture or publishing an audit. EOF during capture interrupts only
+the recorder, closes the audio stream, and lets the supervisor flush final
+text and corrections. `INT` and `TERM` remain hard cancellation: they exit 130
+and never publish a successful audit.
+
+The audit editor records only the explicit destination text. It creates
+nothing itself; the wrapper still requires a nonexistent destination and an
+existing writable parent, and applies its private, atomic, no-overwrite
+publication contract. Persistence is disabled when the editor is blank. Raw
+microphone audio is never saved. See the
 [interactive cascade contract](docs/interactive-cascade.md).
 
 ## Installation and storage
 
 The initial platform is x86-64 Linux. You need Docker, Bash, FFmpeg, standard
-archive/checksum tools, and [Just](https://github.com/casey/just). Live capture
-also requires PipeWire's `pw-cat` command. Python is used by host orchestration
-and tests, but it is not present in deployed inference images.
+archive/checksum tools, and [Just](https://github.com/casey/just). Building the
+TUI requires Cargo and the pinned Rust 1.97.1 toolchain. Live capture also
+requires PipeWire's `pw-cat` and `pw-dump` commands. Python is used by host
+orchestration and tests, but it is not present in deployed inference images.
 
 ```bash
 git clone https://github.com/gracee3/native-asr.git
@@ -145,7 +176,8 @@ just doctor all
 ```
 
 `scripts/doctor [all|long-form|streaming]` is read-only: it reports missing
-tools, an unreachable Docker or PipeWire session, unsupported architecture,
+tools (including Cargo, `pw-dump`, and the release TUI for streaming), an
+unreachable Docker or PipeWire session, unsupported architecture,
 insufficient free space, invalid locked artifacts, and missing or wrong-
 architecture images. It returns `0` only when the selected workflow is ready.
 

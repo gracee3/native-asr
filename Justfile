@@ -22,12 +22,16 @@ build-whisper:
 # Build every currently implemented runtime image.
 build: build-sherpa build-nemo build-moonshine build-whisper
 
+# Build the pinned release terminal client.
+build-tui:
+    cargo build --manifest-path tui/Cargo.toml --release --locked
+
 # Build and fetch the three locked defaults for recorded-audio consensus.
 setup-long-form: build-nemo build-sherpa build-whisper
     @./scripts/models fetch nemo:parakeet-tdt-v3 sherpa:parakeet-unified-en whisper:small.en
 
 # Build and fetch the two locked defaults for the interactive cascade.
-setup-streaming: build-nemo
+setup-streaming: build-nemo build-tui
     @./scripts/models fetch nemo:nemotron-streaming-en nemo:parakeet-tdt-v3
 
 # Diagnose one workflow without downloading or building (all, long-form, streaming).
@@ -79,6 +83,10 @@ ensemble audio output:
 # Start the interactive Nemotron-to-Parakeet cascade from the default PipeWire source.
 cascade-live:
     @./scripts/cascade live
+
+# Select a PipeWire source and run a live cascade session in the Rust TUI.
+tui: build-tui
+    @./tui/target/release/native-asr-tui
 
 # Replay a file at real-time pace through the interactive cascade.
 cascade-file audio:

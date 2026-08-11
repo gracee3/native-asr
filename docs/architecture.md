@@ -79,6 +79,12 @@ resident and produces provisional text and endpoints while a separate,
 restartable resident Parakeet worker corrects finalized phrases. The recorded-
 audio ensemble remains independent of this path.
 
+The Rust `native-asr-tui` binary is a live-only client, not an inference
+runtime. It enumerates and revalidates an explicit PipeWire source, launches the
+headless wrapper in a separate Unix process group, consumes canonical JSONL on
+threads and channels, and keeps committed, correction-pending, and provisional
+text in separate UI state. File replay stays on `scripts/cascade file`.
+
 Benchmark records must distinguish raw runtime behavior from production
 long-form segmentation. Results using different segmentation strategies are not
 presented as direct runtime comparisons without that qualifier.

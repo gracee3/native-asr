@@ -82,9 +82,11 @@ pub fn parse(input: &[u8]) -> Result<Vec<Source>, String> {
         let serial = scalar_property(props, "object.serial")
             .or_else(|| root.get("id").and_then(scalar_value))
             .unwrap_or_else(|| "unknown".to_owned());
+        let device_api = string_property(props, "device.api");
         let is_virtual = class != "Audio/Source"
             || bool_property(props, "node.virtual")
-            || string_property(props, "device.api").is_some_and(|api| api == "virtual");
+            || !props.contains_key("device.id")
+            || device_api.is_some_and(|api| api == "virtual");
         let source = Source {
             node_name: node_name.clone(),
             description,
@@ -156,10 +158,10 @@ mod tests {
             "media.class":"Audio/Sink","node.name":"ignored"}}},
           {"id":3,"type":"PipeWire:Interface:Node","info":{"props":{
             "media.class":"Audio/Source","node.name":"a.physical",
-            "node.description":"Built-in Mic","object.serial":"33"}}},
+            "node.description":"Built-in Mic","object.serial":"33","device.id":2}}},
           {"id":4,"type":"PipeWire:Interface:Node","info":{"props":{
             "media.class":"Audio/Source","node.name":"a.physical",
-            "node.description":"Duplicate","object.serial":"44"}}}
+            "node.description":"Duplicate","object.serial":"44","device.id":2}}}
         ]"#;
         let sources = parse(input).unwrap();
         assert_eq!(sources.len(), 2);

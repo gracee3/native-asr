@@ -40,12 +40,27 @@ if [[ ${1:-} == --version ]]; then
 fi
 exit 3
 EOF
+cat > "$work/bin/pw-dump" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '[]'
+EOF
+cat > "$work/bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$work/bin/native-asr-tui" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
 chmod +x "$work/bin/"*
 
 export DOCKER_BIN=$work/bin/docker
 export NATIVE_ASR_VERIFY_MODELS_BIN=$work/bin/verify
 export PW_CLI_BIN=$work/bin/pw-cli
 export PW_RECORD_BIN=$work/bin/pw-record
+export PW_DUMP_BIN=$work/bin/pw-dump
+export CARGO_BIN=$work/bin/cargo
+export NATIVE_ASR_TUI_BIN=$work/bin/native-asr-tui
 export NATIVE_ASR_MODELS=$work/models
 export NATIVE_ASR_CACHE=$work/cache
 export NATIVE_ASR_DOCTOR_MIN_FREE_BYTES=1
@@ -79,6 +94,8 @@ grep -Fqx 'doctor: streaming ready' "$work/streaming.stdout"
 grep -Fqx 'nemo:nemotron-streaming-en nemo:parakeet-tdt-v3' "$work/verify.log"
 grep -Fq 'asr-nemo-speech' "$work/docker.log"
 grep -Fq 'PipeWire user session reachable' "$work/streaming.stdout"
+grep -Fq "tool $work/bin/pw-dump" "$work/streaming.stdout"
+grep -Fq "release TUI $work/bin/native-asr-tui" "$work/streaming.stdout"
 
 : > "$work/verify.log"
 "$repo_root/scripts/doctor" all > "$work/all.stdout"
@@ -106,7 +123,15 @@ grep -Fq 'nemo:parakeet-tdt-v3 sherpa:parakeet-unified-en whisper:small.en' \
 
 just --justfile "$repo_root/Justfile" --dry-run setup-streaming > "$work/setup-streaming.txt" 2>&1
 grep -Fq 'docker/nemo-speech/Dockerfile' "$work/setup-streaming.txt"
+grep -Fq 'cargo build --manifest-path tui/Cargo.toml --release --locked' \
+  "$work/setup-streaming.txt"
 grep -Fq 'nemo:nemotron-streaming-en nemo:parakeet-tdt-v3' "$work/setup-streaming.txt"
 ! grep -Fq 'docker/sherpa-onnx/Dockerfile' "$work/setup-streaming.txt"
+
+just --justfile "$repo_root/Justfile" --dry-run build-tui > "$work/build-tui.txt" 2>&1
+grep -Fq 'cargo build --manifest-path tui/Cargo.toml --release --locked' \
+  "$work/build-tui.txt"
+just --justfile "$repo_root/Justfile" --dry-run tui > "$work/tui.txt" 2>&1
+grep -Fq './tui/target/release/native-asr-tui' "$work/tui.txt"
 
 printf '%s\n' 'usability smoke: ok'

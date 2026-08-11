@@ -23,10 +23,10 @@ external to Git. Only reviewed aggregate configuration and results may be
 committed. Any runtime, model, endpointing, capture, or host change requires the
 two loopback fixtures to be repeated before another release claim.
 
-## Next milestone: streaming-first Rust TUI
+## Completed post-release milestone: streaming-first Rust TUI
 
-The first post-release milestone is a small Rust terminal client for the
-existing canonical JSONL protocol. It will provide:
+The first post-release milestone delivered a small Rust terminal client for the
+existing canonical JSONL protocol. It provides:
 
 - explicit session start and stop;
 - PipeWire source enumeration and deliberate source selection;
@@ -34,7 +34,7 @@ existing canonical JSONL protocol. It will provide:
 - current latency and degradation status; and
 - optional audit-bundle selection, disabled by default.
 
-The TUI is a client, not another inference runtime. It will not embed ASR,
+The TUI is a client, not another inference runtime. It does not embed ASR,
 rewrite or edit transcript text, invoke an LLM, infer speakers, or perform
 diarization. The headless `scripts/cascade` interface remains supported and is
 the source of truth for event and failure semantics.

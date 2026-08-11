@@ -17,11 +17,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Install host check dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes ffmpeg just jq ripgrep
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal \
+            --component clippy --component rustfmt
+          rustup default 1.97.1
       - name: Run repository checks
         run: ./scripts/check
       - name: Check Markdown links

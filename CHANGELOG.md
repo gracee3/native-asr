@@ -2,6 +2,18 @@
 
 All notable user-facing changes are recorded here.
 
+## Unreleased
+
+- Added the live-only `native-asr-tui` Rust client with deliberate PipeWire
+  source selection, provisional/correction/commit views, latency and
+  degradation status, optional audit destination entry, and terminal-safe
+  graceful/hard shutdown.
+- Added `scripts/cascade live --control-stdin`: EOF stops safely before
+  readiness or flushes an active session, while `INT`/`TERM` remain hard
+  cancellation with status 130 and no successful audit.
+- Added locked Rust formatting, Clippy, unit/process/UI/pseudo-terminal tests,
+  release build recipes, streaming doctor checks, and host-only CI coverage.
+
 ## v0.1.0 - 2026-08-11
 
 The first release supports two complete offline, CPU-only workflows on x86-64
@@ -44,8 +56,8 @@ events, audits, and generated public-corpus audio remain external to Git.
   requires a working PipeWire user session.
 - Streaming recognition is English-only. A physical-microphone smoke test is
   optional and was not part of automated release acceptance.
-- GPU execution, diarization, LLM adjudication, transcript editing, and a TUI
-  are not included. A bounded streaming-first Rust TUI is the next milestone.
+- GPU execution, diarization, LLM adjudication, and transcript editing are not
+  included in `v0.1.0`. The Rust TUI is an unreleased post-tag addition.
 - The reported WERs use deterministic 100-utterance public-corpus fixtures and
   are engineering baselines, not universal accuracy claims.
 - The T14 package sensor peaked at 100 C and 98 C; temperature was recorded but

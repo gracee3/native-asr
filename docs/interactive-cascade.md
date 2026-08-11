@@ -10,11 +10,11 @@ historical snapshots; they are not acceptance evidence for this cascade.
 
 Implemented and accepted on the T14 on 2026-08-10/11. The native C ABI worker,
 streaming adaptation, correction supervisor, canonical JSONL interface,
-default terminal viewer, opt-in audit bundle, and host live/file commands are
-complete. Both PipeWire-loopback 100-utterance acceptance fixtures passed every
-gate through the real live-capture path. The pinned NeMo CLI's separate
-streaming-file adapter still emits no genuine partials; only the cascade
-worker's callback stream is acceptance evidence.
+default terminal viewer, opt-in audit bundle, host live/file commands, and
+streaming-first Rust TUI are complete. Both PipeWire-loopback 100-utterance
+acceptance fixtures passed every gate through the real live-capture path. The
+pinned NeMo CLI's separate streaming-file adapter still emits no genuine
+partials; only the cascade worker's callback stream is acceptance evidence.
 
 ## Product boundary
 
@@ -32,8 +32,7 @@ The deterministic three-model recorded-audio ensemble remains a separate
 offline feature. It is not called from the interactive critical path.
 All existing aliases remain supported for direct and reproducibility use, but
 additional-model work is shelved. LLM adjudication and diarization are not
-planned. A bounded streaming-first Rust TUI client is the next milestone after
-`v0.1.0`; GPU execution and additional full-corpus benchmarking remain outside
+planned. GPU execution and additional full-corpus benchmarking remain outside
 the current release.
 
 ## Runtime shape
@@ -102,6 +101,50 @@ nonzero unless normal end-of-input had already completed. Capture failure is a
 session failure. No event may claim a Parakeet commit without a nonempty,
 on-time Parakeet result.
 
+## Rust TUI
+
+`native-asr-tui` is a live-only client around the canonical JSONL interface. It
+parses `pw-dump` directly, lists `Audio/Source` and subordinate source classes,
+and displays the exact node name, description, physical/virtual classification,
+and serial. Selection is always explicit and is revalidated before Start; the
+client never substitutes the default source.
+
+The client invokes `scripts/cascade live --control-stdin --jsonl` in its own
+Unix process group. Closing the control pipe requests graceful stop. Before
+readiness, that exits zero without starting capture or publishing an audit.
+During capture, it interrupts only `pw-record`, closes the audio FIFO, and lets
+the supervisor flush endpoint text, finish pending corrections, publish any
+requested audit, and return its own status. Hard cancellation signals the
+wrapper; if cleanup has not completed after three seconds, the client kills the
+isolated process group. `INT`/`TERM` still return 130 with no successful audit.
+
+The TUI treats the documented stream as protocol v1. Unknown fields are
+ignored, while missing or invalid fields, lines larger than 1 MiB,
+noncontiguous sequences, changing sessions, noninteractive tracks, invalid
+revision transitions, and unordered or duplicate commits fail the session.
+Committed scrollback, finalized text awaiting commit, and the active
+provisional segment are maintained separately; only canonical replacement and
+commit events can change finalized text.
+
+Controls are:
+
+- arrows or `j`/`k`: select a source while idle;
+- `r`: refresh sources while idle;
+- `a`: edit an explicit audit destination; blank disables persistence;
+- `Enter` or `s`: start;
+- `s`: gracefully stop while listening;
+- `x`: confirm hard cancellation and return to idle;
+- `q`: exit while idle, or gracefully stop and then exit while active;
+- `Ctrl-C`: hard-cancel and exit 130;
+- `Esc`: dismiss editing, confirmation, or a completed/failed session.
+
+Labels accompany every color: `… correcting`, `~ provisional`, and
+`! degraded`. `NO_COLOR` disables color, and terminals smaller than 60×15 show
+a resize message. `NATIVE_ASR_CASCADE_BIN` and `PW_DUMP_BIN` may override the
+two child executables for tests or nonstandard repository layouts. The TUI
+does not embed ASR, edit transcripts, save raw audio, browse files, or replay
+recordings.
+
 ## Optional audit bundle
 
 Persistence is disabled by default. `--audit DIR` requires that `DIR` not exist.
@@ -125,7 +168,9 @@ The intended user interface is:
 
 ```bash
 scripts/cascade live [--source PIPEWIRE_NODE] [OPTIONS]
+scripts/cascade live --source PIPEWIRE_NODE --control-stdin --jsonl
 scripts/cascade file AUDIO [OPTIONS]
+just tui
 just cascade-live
 just cascade-file AUDIO
 just cascade-loopback librispeech-test-clean

@@ -39,6 +39,7 @@
 # Builds, caches, and local tooling
 /build/
 /build-*/
+/tui/target/
 **/build/
 **/build-*/
 .cache/

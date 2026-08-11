@@ -46,6 +46,13 @@ awk -F'|' '
 
 python3 -m py_compile scripts/lib/*.py
 
+(
+  cd tui
+  cargo fmt -- --check
+  cargo clippy --all-targets --locked -- -D warnings
+  cargo test --locked
+)
+
 ./scripts/models list >/dev/null
 ./tests/sherpa-entrypoint-smoke
 ./tests/nemo-entrypoint-smoke
