@@ -31,6 +31,8 @@ struct Packet {
     Message kind = Message::error;
     std::uint32_t id = 0;
     std::uint64_t audio_ms = 0;
+    std::uint64_t speech_start_ms = 0;
+    std::uint64_t speech_end_ms = 0;
     std::string text;
 };
 
@@ -100,16 +102,18 @@ inline bool read_command(
 
 inline bool write_packet(
     int fd, Message message, std::uint32_t id, std::uint64_t audio_ms,
-    const std::string& text = {}) {
+    const std::string& text = {}, std::uint64_t speech_start_ms = 0,
+    std::uint64_t speech_end_ms = 0) {
     const auto kind = static_cast<std::uint8_t>(message);
     const auto length = static_cast<std::uint32_t>(text.size());
     return write_scalar(fd, kind) && write_scalar(fd, id) && write_scalar(fd, audio_ms) &&
+           write_scalar(fd, speech_start_ms) && write_scalar(fd, speech_end_ms) &&
            write_scalar(fd, length) && (text.empty() || write_all(fd, text.data(), text.size()));
 }
 
 inline bool parse_packet(std::vector<std::uint8_t>* buffer, Packet* packet) {
     constexpr std::size_t header = sizeof(std::uint8_t) + sizeof(std::uint32_t) +
-                                   sizeof(std::uint64_t) + sizeof(std::uint32_t);
+                                   sizeof(std::uint64_t) * 3 + sizeof(std::uint32_t);
     if (buffer->size() < header)
         return false;
     std::size_t offset = 0;
@@ -119,6 +123,11 @@ inline bool parse_packet(std::vector<std::uint8_t>* buffer, Packet* packet) {
     offset += sizeof(packet->id);
     std::memcpy(&packet->audio_ms, buffer->data() + offset, sizeof(packet->audio_ms));
     offset += sizeof(packet->audio_ms);
+    std::memcpy(
+        &packet->speech_start_ms, buffer->data() + offset, sizeof(packet->speech_start_ms));
+    offset += sizeof(packet->speech_start_ms);
+    std::memcpy(&packet->speech_end_ms, buffer->data() + offset, sizeof(packet->speech_end_ms));
+    offset += sizeof(packet->speech_end_ms);
     std::uint32_t length = 0;
     std::memcpy(&length, buffer->data() + offset, sizeof(length));
     offset += sizeof(length);

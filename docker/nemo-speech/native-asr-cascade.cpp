@@ -365,6 +365,8 @@ struct Options {
     int endpoint_ms = 800;
     int deadline_ms = 2500;
     int right_context = 1;
+    int acoustic_shift_ms = 880;
+    int acoustic_tail_ms = 320;
     bool jsonl = false;
     bool pace = false;
 };
@@ -503,6 +505,8 @@ class Cascade {
                << ",\"parakeet_loads\":" << parakeet_.starts()
                << ",\"endpoint_ms\":" << options_.endpoint_ms
                << ",\"deadline_ms\":" << options_.deadline_ms
+               << ",\"acoustic_shift_ms\":" << options_.acoustic_shift_ms
+               << ",\"acoustic_tail_ms\":" << options_.acoustic_tail_ms
                << ",\"paced\":" << (options_.pace ? "true" : "false")
                << ",\"right_context_frames\":" << options_.right_context << "}";
         audit_.publish(result.str(), transcript_);
@@ -593,7 +597,7 @@ class Cascade {
                 ::poll(&fd, 1, wait_ms);
             }
         }
-        segment_audio_.insert(segment_audio_.end(), samples, samples + count);
+        audio_buffer_.insert(audio_buffer_.end(), samples, samples + count);
         total_samples_ += count;
         const std::uint32_t request = ++nemotron_request_;
         if (!nemotron_.send(protocol::Command::audio, request, samples, count))
@@ -642,7 +646,7 @@ class Cascade {
                 return;
             Segment partial;
             partial.id = next_segment_id_;
-            partial.audio_start_ms = segment_audio_base_sample_ * 1000ULL / kSampleRate;
+            partial.audio_start_ms = next_audio_start_ms_;
             partial.audio_end_ms = std::max(partial.audio_start_ms, packet.audio_ms);
             emit(
                 partial, current_revision_++, "provisional", "nemo:nemotron-streaming-en",
@@ -655,8 +659,25 @@ class Cascade {
 
         auto segment = std::make_shared<Segment>();
         segment->id = next_segment_id_++;
-        segment->audio_start_ms = segment_audio_base_sample_ * 1000ULL / kSampleRate;
-        segment->audio_end_ms = std::max(segment->audio_start_ms, packet.audio_ms);
+        const std::uint64_t frontier_ms = total_samples_ * 1000ULL / kSampleRate;
+        bool has_word_bounds =
+            packet.speech_end_ms > packet.speech_start_ms &&
+            packet.speech_start_ms < frontier_ms;
+        if (has_word_bounds) {
+            const auto shift_ms = static_cast<std::uint64_t>(options_.acoustic_shift_ms);
+            const auto tail_ms = static_cast<std::uint64_t>(options_.acoustic_tail_ms);
+            segment->audio_start_ms =
+                packet.speech_start_ms > shift_ms ? packet.speech_start_ms - shift_ms : 0;
+            const std::uint64_t shifted_end_ms =
+                packet.speech_end_ms > shift_ms ? packet.speech_end_ms - shift_ms : 0;
+            segment->audio_end_ms = std::min(
+                frontier_ms, std::max(segment->audio_start_ms, shifted_end_ms + tail_ms));
+            has_word_bounds = segment->audio_end_ms > segment->audio_start_ms;
+        }
+        if (!has_word_bounds) {
+            segment->audio_start_ms = next_audio_start_ms_;
+            segment->audio_end_ms = std::max(segment->audio_start_ms, packet.audio_ms);
+        }
         segment->nemotron_text = text;
         segment->selected_text = text;
         segment->selected_revision = current_revision_++;
@@ -664,16 +685,46 @@ class Cascade {
         segment->finalized_at = Clock::now();
         segment->deadline = segment->finalized_at + std::chrono::milliseconds(options_.deadline_ms);
 
-        const std::uint64_t requested_end_sample =
-            std::min<std::uint64_t>(total_samples_, segment->audio_end_ms * kSampleRate / 1000ULL);
-        const std::uint64_t available = requested_end_sample > segment_audio_base_sample_
-                                            ? requested_end_sample - segment_audio_base_sample_
-                                            : 0;
-        const std::size_t take = std::min<std::size_t>(segment_audio_.size(), available);
-        segment->audio.assign(segment_audio_.begin(), segment_audio_.begin() + static_cast<std::ptrdiff_t>(take));
-        segment_audio_.erase(
-            segment_audio_.begin(), segment_audio_.begin() + static_cast<std::ptrdiff_t>(take));
-        segment_audio_base_sample_ += take;
+        // Cache-aware Nemotron reports audio_processed at the raw ingress
+        // frontier, which can include buffered audio after the endpoint. Its
+        // word offsets are the absolute decoded-token clock. Apply the measured
+        // emission-to-acoustic shift symmetrically to both bounds, then retain a
+        // rolling margin across endpoints so buffered future is still available
+        // for the following correction.
+        const std::uint64_t requested_start_sample =
+            segment->audio_start_ms * kSampleRate / 1000ULL;
+        const std::uint64_t requested_end_sample = std::min<std::uint64_t>(
+            total_samples_, segment->audio_end_ms * kSampleRate / 1000ULL);
+        const std::uint64_t available_start_sample =
+            std::max(requested_start_sample, audio_buffer_base_sample_);
+        if (requested_end_sample > available_start_sample) {
+            const std::size_t begin = std::min<std::size_t>(
+                audio_buffer_.size(), available_start_sample - audio_buffer_base_sample_);
+            const std::size_t end = std::min<std::size_t>(
+                audio_buffer_.size(), requested_end_sample - audio_buffer_base_sample_);
+            if (end > begin) {
+                segment->audio.assign(
+                    audio_buffer_.begin() + static_cast<std::ptrdiff_t>(begin),
+                    audio_buffer_.begin() + static_cast<std::ptrdiff_t>(end));
+            }
+        }
+
+        const std::uint64_t retain_from_ms =
+            has_word_bounds &&
+                    segment->audio_end_ms > static_cast<std::uint64_t>(options_.acoustic_shift_ms)
+                ? segment->audio_end_ms - static_cast<std::uint64_t>(options_.acoustic_shift_ms)
+                : (has_word_bounds ? 0 : segment->audio_end_ms);
+        const std::uint64_t retain_from_sample = std::min<std::uint64_t>(
+            total_samples_, retain_from_ms * kSampleRate / 1000ULL);
+        if (retain_from_sample > audio_buffer_base_sample_) {
+            const std::size_t drop = std::min<std::size_t>(
+                audio_buffer_.size(), retain_from_sample - audio_buffer_base_sample_);
+            audio_buffer_.erase(
+                audio_buffer_.begin(),
+                audio_buffer_.begin() + static_cast<std::ptrdiff_t>(drop));
+            audio_buffer_base_sample_ += drop;
+        }
+        next_audio_start_ms_ = segment->audio_end_ms;
 
         emit(
             *segment, segment->selected_revision, "model_final",
@@ -836,8 +887,9 @@ class Cascade {
     std::uint32_t current_revision_ = 0;
     std::uint32_t nemotron_request_ = 0;
     std::uint64_t total_samples_ = 0;
-    std::uint64_t segment_audio_base_sample_ = 0;
-    std::vector<float> segment_audio_;
+    std::uint64_t audio_buffer_base_sample_ = 0;
+    std::uint64_t next_audio_start_ms_ = 0;
+    std::vector<float> audio_buffer_;
     std::string last_partial_;
     std::deque<std::shared_ptr<Segment>> pending_;
     std::shared_ptr<Segment> active_;
@@ -860,6 +912,8 @@ void usage(const char* argv0) {
         "  --endpoint-ms N         token-silence endpoint threshold (default: 800)\n"
         "  --deadline-ms N         Parakeet correction deadline (default: 2500)\n"
         "  --right-context N       RNNT encoder frames (default: 1, about 160 ms)\n"
+        "  --acoustic-shift-ms N    token-to-acoustic timing shift (default: 880)\n"
+        "  --acoustic-tail-ms N     terminal acoustic allowance (default: 320)\n"
         "  --nemotron MODEL        streaming GGUF path\n"
         "  --parakeet MODEL        correction GGUF path\n"
         "  --worker PATH           native worker path (test/development override)\n",
@@ -882,6 +936,10 @@ Options parse_options(int argc, char** argv) {
             options.deadline_ms = std::atoi(argv[++i]);
         else if (arg == "--right-context" && i + 1 < argc)
             options.right_context = std::atoi(argv[++i]);
+        else if (arg == "--acoustic-shift-ms" && i + 1 < argc)
+            options.acoustic_shift_ms = std::atoi(argv[++i]);
+        else if (arg == "--acoustic-tail-ms" && i + 1 < argc)
+            options.acoustic_tail_ms = std::atoi(argv[++i]);
         else if (arg == "--nemotron" && i + 1 < argc)
             options.nemotron = argv[++i];
         else if (arg == "--parakeet" && i + 1 < argc)
@@ -896,8 +954,10 @@ Options parse_options(int argc, char** argv) {
             throw std::runtime_error("unknown or incomplete option: " + arg);
         }
     }
-    if (options.endpoint_ms <= 0 || options.deadline_ms <= 0 || options.right_context < 0)
-        throw std::runtime_error("endpoint/deadline must be positive and right context nonnegative");
+    if (options.endpoint_ms <= 0 || options.deadline_ms <= 0 || options.right_context < 0 ||
+        options.acoustic_shift_ms < 0 || options.acoustic_tail_ms < 0)
+        throw std::runtime_error(
+            "endpoint/deadline must be positive; context values must be nonnegative");
     if (options.audit == "." || options.audit == "..")
         throw std::runtime_error("invalid audit destination");
     return options;

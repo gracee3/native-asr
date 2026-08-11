@@ -96,7 +96,17 @@ bool emit_stream_results(nemo_speech_asr_stream* stream, std::string* error) {
         const auto kind = nemo_speech_asr_result_is_final(result) ? protocol::Message::final
                                                                  : protocol::Message::partial;
         const std::string text = result_text(result);
-        const bool ok = protocol::write_packet(STDOUT_FILENO, kind, 0, audio_ms, text);
+        std::uint64_t speech_start_ms = 0;
+        std::uint64_t speech_end_ms = 0;
+        const std::size_t words = nemo_speech_asr_result_word_count(result, 0);
+        if (words > 0) {
+            speech_start_ms = static_cast<std::uint64_t>(std::max(
+                0, nemo_speech_asr_result_word_start_time(result, 0, 0)));
+            speech_end_ms = static_cast<std::uint64_t>(std::max(
+                0, nemo_speech_asr_result_word_end_time(result, 0, words - 1)));
+        }
+        const bool ok = protocol::write_packet(
+            STDOUT_FILENO, kind, 0, audio_ms, text, speech_start_ms, speech_end_ms);
         nemo_speech_asr_result_destroy(result);
         if (!ok) {
             *error = "failed to write streaming result";
@@ -211,16 +221,35 @@ int offline_worker(const char* model) {
                 "offline worker received an invalid command");
             return 3;
         }
-        nemo_speech_asr_result* result = nullptr;
-        if (nemo_speech_asr_recognize_f32(
-                recognizer.handle, &options, samples.data(), samples.size(), 16000, &result) !=
-            NEMO_SPEECH_ASR_OK) {
-            error = last_error("nemo_speech_asr_recognize_f32");
+        const auto recognize = [&](const std::vector<float>& audio, std::string* text) {
+            nemo_speech_asr_result* result = nullptr;
+            if (nemo_speech_asr_recognize_f32(
+                    recognizer.handle, &options, audio.data(), audio.size(), 16000, &result) !=
+                NEMO_SPEECH_ASR_OK) {
+                error = last_error("nemo_speech_asr_recognize_f32");
+                return false;
+            }
+            *text = result_text(result);
+            nemo_speech_asr_result_destroy(result);
+            return true;
+        };
+        std::string text;
+        if (!recognize(samples, &text)) {
             protocol::write_packet(STDOUT_FILENO, protocol::Message::error, id, 0, error);
             return 3;
         }
-        const std::string text = result_text(result);
-        nemo_speech_asr_result_destroy(result);
+        if (text.empty()) {
+            // The pinned TDT head can return an empty 1-best for a valid short
+            // phrase at particular terminal shapes. One bounded native retry
+            // changes only encoder flush geometry and does not add speech.
+            std::vector<float> padded(10240, 0.0F);  // 640 ms leading silence
+            padded.insert(padded.end(), samples.begin(), samples.end());
+            padded.resize(padded.size() + 20480, 0.0F);  // 1280 ms trailing silence
+            if (!recognize(padded, &text)) {
+                protocol::write_packet(STDOUT_FILENO, protocol::Message::error, id, 0, error);
+                return 3;
+            }
+        }
         if (!protocol::write_packet(STDOUT_FILENO, protocol::Message::result, id, 0, text))
             return 3;
     }

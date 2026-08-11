@@ -73,3 +73,20 @@ models/
 ```
 
 Do not move downloaded files into `docker/` or any other build-context path.
+
+## Interactive model roles
+
+The accepted English interactive path uses exactly two NeMo models from the
+read-only tree above:
+
+- `nemo:nemotron-streaming-en` is the persistent first pass. It emits genuine
+  provisional revisions, word timings, and 800 ms token-silence phrase finals
+  with one 160 ms right-context frame.
+- `nemo:parakeet-tdt-v3` is the persistent authoritative correction pass. Each
+  finalized phrase is decoded natively through the pinned stable C ABI; an
+  empty result receives one bounded silence-only flush retry.
+
+`nemo:nemotron-3.5-streaming` remains a later multilingual option. The
+three-model recorded-audio ensemble is independent of this pair and is not in
+the interactive critical path. No role changes the storage rule: every GGUF
+stays host-managed and is mounted read-only rather than copied into an image.

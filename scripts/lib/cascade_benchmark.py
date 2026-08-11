@@ -48,28 +48,42 @@ def atomic_json(path: Path, value: dict) -> None:
     os.replace(temporary, path)
 
 
-def selected_rows(dataset: str, limit: int) -> tuple[Path, list[dict]]:
+def selected_rows(dataset: str, limit: int, selection: str) -> tuple[Path, list[dict]]:
     manifest = DATASETS / "manifests" / f"{dataset}.jsonl"
     if not manifest.is_file():
         raise SystemExit(f"error: prepared dataset manifest is missing: {manifest}")
     rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line]
-    rows.sort(
-        key=lambda row: (
-            hashlib.sha256(row["utterance_id"].encode()).hexdigest(), row["utterance_id"]
+    if selection == "phrase":
+        rows.sort(
+            key=lambda row: (
+                abs(float(row["duration_seconds"]) - 3.0),
+                hashlib.sha256(row["utterance_id"].encode()).hexdigest(),
+                row["utterance_id"],
+            )
         )
-    )
+    else:
+        rows.sort(
+            key=lambda row: (
+                hashlib.sha256(row["utterance_id"].encode()).hexdigest(), row["utterance_id"]
+            )
+        )
     if len(rows) < limit:
         raise SystemExit(f"error: {dataset} has only {len(rows)} prepared utterances")
     return manifest, rows[:limit]
 
 
-def fixture(dataset: str, manifest: Path, rows: list[dict], silence_ms: int) -> tuple[Path, dict]:
+def fixture(
+    dataset: str, manifest: Path, rows: list[dict], silence_ms: int, selection: str = "phrase"
+) -> tuple[Path, dict]:
     identity = {
         "schema_version": 1,
         "dataset": dataset,
         "manifest_sha256": digest(manifest),
         "utterance_ids": [row["utterance_id"] for row in rows],
-        "selection": "sha256(utterance_id)",
+        "selection": (
+            "abs(duration_seconds-3.0),sha256(utterance_id)" if selection == "phrase"
+            else "sha256(utterance_id)"
+        ),
         "silence_ms": silence_ms,
         "format": "pcm16le-16000hz-mono",
     }
@@ -310,16 +324,31 @@ def main() -> None:
     parser.add_argument("dataset", choices=("librispeech-test-clean", "librispeech-test-other"))
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--silence-ms", type=int, default=1000)
+    parser.add_argument(
+        "--selection", choices=("phrase", "hash"), default="phrase",
+        help="phrase sorts by distance from three seconds for the interactive acceptance fixture; "
+             "hash retains the broader long-form stress sample",
+    )
+    parser.add_argument("--acoustic-shift-ms", type=int, default=880)
+    parser.add_argument("--acoustic-tail-ms", type=int, default=320)
     timing = parser.add_mutually_exclusive_group()
     timing.add_argument("--paced", dest="paced", action="store_true", default=True)
     timing.add_argument("--unpaced", dest="paced", action="store_false")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if args.limit <= 0 or args.silence_ms < 1000:
-        parser.error("--limit must be positive and --silence-ms must be at least 1000")
+    if (
+        args.limit <= 0 or args.silence_ms < 1000 or
+        args.acoustic_shift_ms < 0 or args.acoustic_tail_ms < 0
+    ):
+        parser.error(
+            "--limit must be positive, --silence-ms must be at least 1000, "
+            "and acoustic context must be nonnegative"
+        )
 
-    manifest, rows = selected_rows(args.dataset, args.limit)
-    audio, fixture_info = fixture(args.dataset, manifest, rows, args.silence_ms)
+    manifest, rows = selected_rows(args.dataset, args.limit, args.selection)
+    audio, fixture_info = fixture(
+        args.dataset, manifest, rows, args.silence_ms, args.selection
+    )
     created = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     mode = "paced" if args.paced else "unpaced"
     base = args.output or BENCHMARKS / "cascade" / f"{created}-{args.dataset}-{args.limit}-{mode}"
@@ -332,6 +361,8 @@ def main() -> None:
     command = [
         str(ROOT / "scripts/cascade"), "file", str(audio),
         "--paced" if args.paced else "--unpaced", "--jsonl", "--audit", str(audit),
+        "--acoustic-shift-ms", str(args.acoustic_shift_ms),
+        "--acoustic-tail-ms", str(args.acoustic_tail_ms),
     ]
     base.parent.mkdir(parents=True, exist_ok=True)
     swap_start = swap_used_kb()
@@ -364,6 +395,9 @@ def main() -> None:
         "memory_bytes": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"),
         "kernel": platform.release(),
         "docker_version": command_output(["docker", "--version"]),
+        "acoustic_shift_ms": args.acoustic_shift_ms,
+        "acoustic_tail_ms": args.acoustic_tail_ms,
+        "selection": args.selection,
     })
     atomic_json(summary_path, summary)
     print(json.dumps(summary, sort_keys=True, indent=2))

@@ -43,7 +43,14 @@ int stream_worker() {
                 STDOUT_FILENO, protocol::Message::partial, 0, audio_ms,
                 prefix + " partial " + std::to_string(chunks));
             if (chunks >= final_every) {
-                protocol::write_packet(STDOUT_FILENO, protocol::Message::final, 0, audio_ms, prefix);
+                const bool timed = environment_int("CASCADE_FAKE_WORD_BOUNDS", 0) != 0;
+                const std::uint64_t speech_start_ms =
+                    timed && audio_ms >= 480 ? audio_ms - 480 : 0;
+                const std::uint64_t speech_end_ms =
+                    timed && audio_ms >= 320 ? audio_ms - 320 : 0;
+                protocol::write_packet(
+                    STDOUT_FILENO, protocol::Message::final, 0, audio_ms, prefix,
+                    speech_start_ms, speech_end_ms);
                 chunks = 0;
                 ++segment;
             }
@@ -84,7 +91,10 @@ int offline_worker() {
                 STDOUT_FILENO, protocol::Message::error, id, 0, "injected Parakeet failure");
             return 3;
         }
-        const std::string text = mode == "empty" ? "" : "parakeet segment " + std::to_string(id + 1);
+        const std::string text =
+            mode == "empty" ? "" :
+            mode == "sample_count" ? std::to_string(samples.size()) :
+            "parakeet segment " + std::to_string(id + 1);
         if (!protocol::write_packet(STDOUT_FILENO, protocol::Message::result, id, 0, text))
             return 3;
     }

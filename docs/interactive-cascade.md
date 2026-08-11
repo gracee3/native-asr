@@ -8,11 +8,12 @@ historical snapshots; they are not acceptance evidence for this cascade.
 
 ## Status
 
-The direction and interfaces below are approved. Implementation and T14 gates
-are pending until explicitly marked complete in this document and in
-`docs/reproducibility-report.md`. In particular, the pinned NeMo CLI's existing
-streaming-file adapter still emits no genuine partials and is not evidence that
-the cascade's streaming adaptation is complete.
+Implemented and accepted on the T14 on 2026-08-10/11. The native C ABI worker,
+streaming adaptation, correction supervisor, canonical JSONL interface,
+default terminal viewer, opt-in audit bundle, and host live/file commands are
+complete. Both paced 100-utterance acceptance fixtures passed every gate. The
+pinned NeMo CLI's separate streaming-file adapter still emits no genuine
+partials; only the cascade worker's callback stream is acceptance evidence.
 
 ## Product boundary
 
@@ -124,6 +125,14 @@ Live capture is never invoked by repository checks or automated acceptance.
 Public audio with at least one second of silence between utterances is used for
 paced interactive validation.
 
+`scripts/cascade-benchmark` defaults to the reproducible `phrase` selection:
+complete utterances ranked by distance from three seconds, with SHA-256 of the
+utterance ID as the stable tie-breaker. This keeps the acceptance corpus aligned
+with endpointed interactive phrases while retaining 31 `test-clean` speakers
+and 28 `test-other` speakers. `--selection hash` retains the broader
+SHA-256-ranked stress sample; it is deliberately not interchangeable with the
+accepted phrase fixture.
+
 ## Acceptance gates
 
 Repository tests cover event ordering, revision replacement, authoritative
@@ -144,3 +153,23 @@ lag, RTF, CPU, peak RSS, and thermals. Acceptance requires contiguous events,
 zero runtime failures or degraded segments in nominal paced runs, p95 partial
 lag at most 750 ms, every correction committed within 2.5 seconds, and committed
 WER no worse than Nemotron on either subset.
+
+## Accepted T14 results
+
+The final image was
+`sha256:aaa251a769996379b3d83710316400beaaa1f3649c9efbcc20516262b8f6b681`.
+Both paced runs used the default 800 ms endpoint, 160 ms right context, 880 ms
+token-to-acoustic shift, 320 ms acoustic tail, and a 2.5 second correction
+deadline. They loaded each model once, showed new Nemotron provisional events
+while Parakeet corrections were active, and caused no swap growth.
+
+| Fixture | Nemotron WER | Committed WER | Correction rate | Churn | Degraded | Partial p95 | Correction p95 / max | RTF | Peak RSS KiB | Package peak |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `test-clean`, 100 utterances | 5.14% | 4.61% | 28.57% | 5.19% | 0 | 56 ms | 667 / 1,060 ms | 1.002 | 1,736,156 | 100 C |
+| `test-other`, 100 utterances | 6.91% | 5.56% | 39.62% | 7.48% | 0 | 57 ms | 600 / 864 ms | 1.001 | 1,731,948 | 98 C |
+
+The corresponding unpaced CPU-pressure runs also completed with zero
+degradations and the same WERs. Their RTFs were 0.415 and 0.444 respectively;
+they are stress evidence, not latency acceptance. Raw events, transcripts, and
+local audit bundles remain outside Git. Reviewed configuration and aggregate
+run identifiers are recorded in `docs/reproducibility-report.md`.

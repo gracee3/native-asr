@@ -44,8 +44,28 @@ with tempfile.TemporaryDirectory(prefix="native-asr-cascade-benchmark.") as temp
     assert audio.is_file()
     assert info["frames"] == 19200
     assert info["duration_seconds"] == 1.2
+    assert info["selection"] == "abs(duration_seconds-3.0),sha256(utterance_id)"
     # A repeated build must reuse the same verified fixture.
     assert benchmark.fixture("librispeech-test-clean", manifest, rows, 1000)[0] == audio
+
+    manifest_dir = benchmark.DATASETS / "manifests"
+    manifest_dir.mkdir(parents=True)
+    selection_rows = [
+        {"utterance_id": "short", "duration_seconds": 1.0},
+        {"utterance_id": "near-low", "duration_seconds": 2.9},
+        {"utterance_id": "near-high", "duration_seconds": 3.1},
+        {"utterance_id": "long", "duration_seconds": 9.0},
+    ]
+    selection_manifest = manifest_dir / "librispeech-test-clean.jsonl"
+    selection_manifest.write_text(
+        "".join(json.dumps(row) + "\n" for row in selection_rows), encoding="utf-8"
+    )
+    _, phrase_rows = benchmark.selected_rows("librispeech-test-clean", 2, "phrase")
+    assert {row["utterance_id"] for row in phrase_rows} == {"near-low", "near-high"}
+    _, hash_rows = benchmark.selected_rows("librispeech-test-clean", 4, "hash")
+    assert {row["utterance_id"] for row in hash_rows} == {
+        "short", "near-low", "near-high", "long"
+    }
 
     events = [
         {"sequence": 0, "state": "provisional", "segment_id": 0,

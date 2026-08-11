@@ -14,9 +14,9 @@ g++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread \
   "$repo_root/tests/fixtures/cascade-fake-worker.cpp" \
   -o "$work/worker"
 
-# Six 160 ms chunks of raw mono float32 silence. The fake worker endpoints every
-# two chunks, so prefixes select deterministic one-, two-, and three-segment cases.
-dd if=/dev/zero of="$work/audio.f32" bs=10240 count=6 status=none
+# Eight 160 ms chunks of raw mono float32 silence. The fake worker endpoints
+# every two chunks by default; prefixes select deterministic segment counts.
+dd if=/dev/zero of="$work/audio.f32" bs=10240 count=8 status=none
 
 run_cascade() {
   local output=$1 chunks=$2
@@ -36,6 +36,21 @@ jq -s -e '
   and (all(.[]; .latency_ms >= 0 and .audio_end_ms >= .audio_start_ms))
   and (all(.[] | select(.state == "committed"); .degraded == false))
 ' "$work/success.jsonl" >/dev/null
+
+# The ingress frontier can lead the final words. Absolute word bounds must
+# select the intended 200 ms correction window and retain buffered future for
+# the next phrase instead of assigning it to the first correction.
+head -c 81920 "$work/audio.f32" |
+  env CASCADE_FAKE_FINAL_EVERY=4 CASCADE_FAKE_WORD_BOUNDS=1 \
+    CASCADE_FAKE_SCENARIO=sample_count \
+  "$work/cascade" --jsonl --worker "$work/worker" \
+    --nemotron fake --parakeet fake \
+    --acoustic-shift-ms 40 --acoustic-tail-ms 0 > "$work/word-bounds.jsonl"
+jq -s -e '
+  ([.[] | select(.state == "committed") | .text] == ["2560", "2560"])
+  and ([.[] | select(.state == "committed") | [.audio_start_ms, .audio_end_ms]]
+       == [[120, 280], [760, 920]])
+' "$work/word-bounds.jsonl" >/dev/null
 jq -s -e '
   [group_by(.segment_id)[] |
     ([.[] | select(.state == "model_final") | .model]

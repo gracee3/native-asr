@@ -6,9 +6,75 @@ All results dated 2026-08-09 below are preserved historical i7-1185G7
 snapshots. They remain useful for their recorded benchmark fingerprints but are
 not evidence for the current interactive milestone. Beginning 2026-08-10, the
 ThinkPad T14 i5-1145G7 with 15 GiB RAM is the sole development and acceptance
-host for the Nemotron-to-Parakeet cascade. Reviewed T14 cascade aggregates will
-be appended in a separate section after its gates pass; raw event logs remain
-outside Git.
+host for the Nemotron-to-Parakeet cascade. Reviewed T14 cascade aggregates are
+recorded below; raw event logs remain outside Git.
+
+## 2026-08-10/11 accepted T14 interactive cascade
+
+The CPU-only interactive cascade passed on an 11th Gen Intel Core i5-1145G7
+(four cores, eight logical CPUs), 16,454,795,264 bytes of RAM, Linux
+`7.0.0-28-generic`, and Docker `29.7.2`. The final NeMo image is
+`sha256:aaa251a769996379b3d83710316400beaaa1f3649c9efbcc20516262b8f6b681`,
+200,682,873 bytes, configured as `65532:65532`. Models were verified on the
+host, mounted read-only at `/models`, and run with `--network none`.
+
+The interactive acceptance fixture is distinct from the historical batch
+subset. For each split it ranks complete utterances by
+`abs(duration_seconds - 3.0)`, then by SHA-256 of `utterance_id`, and selects
+the first 100. This gives endpoint-sized speech while remaining deterministic:
+
+| Split | Speech duration range | Speech seconds | Reference words | Speakers | Fixture SHA-256 |
+|---|---:|---:|---:|---:|---|
+| `test-clean` | 2.885-3.110 s | 300.550 | 759 | 31 | `2ebdbe7ba9fe868a8a16cc97ff752eb36ac8f3b05ce305445bff2e2335ccb09a` |
+| `test-other` | 2.900-3.100 s | 300.490 | 810 | 28 | `01dac75ca1047a7a2e64bf729fa80fa90599f2281bffb22e79d911f7352c8211` |
+
+Each fixture inserts 1,000 ms of silence between utterances, producing total
+durations of 399.550 and 399.490 seconds. Both runs used the default 800 ms
+endpoint, one 160 ms RNNT right-context frame, 880 ms token-to-acoustic shift,
+320 ms acoustic tail, 2.5 second correction deadline, one active correction,
+and one waiting correction. WER uses `english-upper-apostrophe-v1`.
+
+### Paced acceptance
+
+| Split | External run ID | Segments / events | Nemotron WER | Committed WER | Corrected / rate | Churn | Degraded | Partial p95 | Correction p95 / max | RTF | CPU user+sys s | Peak RSS KiB | Package peak |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `test-clean` | `20260811T025807300649Z-librispeech-test-clean-100-paced` | 105 / 1,134 | 5.14% | 4.61% | 30 / 28.57% | 5.19% | 0 | 56 ms | 667 / 1,060 ms | 1.002 | 845.325 | 1,736,156 | 100 C |
+| `test-other` | `20260811T030456215565Z-librispeech-test-other-100-paced` | 106 / 1,160 | 6.91% | 5.56% | 42 / 39.62% | 7.48% | 0 | 57 ms | 600 / 864 ms | 1.001 | 842.137 | 1,731,948 | 98 C |
+
+Every acceptance boolean passed: contiguous global sequences, ordered commits,
+zero degraded segments, p95 partial lag at most 750 ms, every correction within
+2.5 seconds, and committed WER no worse than Nemotron. Each healthy session
+loaded Nemotron once and Parakeet once. New Nemotron provisional events occurred
+inside active Parakeet correction windows in both runs, directly confirming
+that first-pass decoding continued during correction. Swap use did not grow.
+
+The package temperature maxima are reported rather than hidden; there was no
+thermal acceptance threshold. RTF remained essentially real time. The audit
+directories were mode `0700` with `0600` files and contain events, result, and
+committed transcript only—never raw audio.
+
+### Unpaced stress and selection boundary
+
+The matching unpaced runs
+`20260811T025211490373Z-librispeech-test-clean-100-unpaced` and
+`20260811T025503136187Z-librispeech-test-other-100-unpaced` completed with the
+same WERs, zero degradations, one load per model, no swap growth, and RTF 0.415
+and 0.444. They validate CPU-pressure stability but are not latency evidence.
+
+A broader `--selection hash` clean fixture was also exercised and rejected as
+interactive acceptance evidence. Its long audiobook utterances were split into
+187 mid-sentence endpoint regions; committed WER was worse than Nemotron and it
+produced empty corrections. The hash mode remains available as an explicit
+stress test. It is not silently combined with the accepted endpoint-sized
+phrase fixture, and the separate three-model recorded-audio ensemble remains
+the supported long-form path.
+
+The benchmark summaries recorded the then-current `f27fdc2` revision with
+`dirty_tree=true` because the final worker retry and fixture policy were being
+validated before the third reviewable commit was amended. The image ID,
+fixture digests, commands, and external run IDs above identify the exact tested
+content. Raw local event streams, transcripts, and audit bundles were not
+committed.
 
 ## 2026-08-09 validated i7 state
 

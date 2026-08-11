@@ -28,6 +28,8 @@ Options:
   --endpoint-ms N         token-silence endpoint threshold (default: 800)
   --deadline-ms N         Parakeet correction deadline (default: 2500)
   --right-context N       RNNT encoder frames (default: 1, about 160 ms)
+  --acoustic-shift-ms N   token-to-acoustic timing shift (default: 880)
+  --acoustic-tail-ms N    terminal acoustic allowance (default: 320)
   --source NODE           selected PipeWire source (live mode only)
   --paced                 replay file at real-time pace (file default)
   --unpaced               decode file without replay pacing
@@ -62,7 +64,7 @@ while (($#)); do
       cascade_args+=(--jsonl)
       shift
       ;;
-    --audit|--endpoint-ms|--deadline-ms|--right-context)
+    --audit|--endpoint-ms|--deadline-ms|--right-context|--acoustic-shift-ms|--acoustic-tail-ms)
       (($# >= 2)) || die "$1 requires a value"
       if [[ $1 == --audit ]]; then
         audit=$2

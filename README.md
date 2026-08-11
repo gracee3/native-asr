@@ -23,8 +23,10 @@ The current development direction is an English CPU-only interactive cascade on
 the ThinkPad T14 (i5-1145G7, 15 GiB): NeMo Nemotron provides provisional phrase
 text and NeMo Parakeet TDT v3 authoritatively re-decodes each endpointed phrase.
 The design and acceptance contract are recorded in
-[`docs/interactive-cascade.md`](docs/interactive-cascade.md); implementation and
-T14 gates remain pending until that document is updated with verified results.
+[`docs/interactive-cascade.md`](docs/interactive-cascade.md). The native worker,
+supervisor, genuine partial stream, terminal/JSONL interfaces, private audit
+bundle, and T14 gates are complete. Both paced 100-utterance phrase fixtures
+passed with zero degradations and committed WER below Nemotron.
 
 The deterministic 100-utterance gate is complete for all nine aliases on both
 LibriSpeech splits: 18/18 runs completed with zero failures. A lower-commitment
@@ -238,6 +240,33 @@ artifact provenance:
 Audio normalization uses a temporary 16 kHz mono PCM16 WAV and never modifies
 the original recording. `--language`, `--output`, `--vad`, and `--stream` are
 available through the script without expanding the simple Just recipe.
+
+## Interactive cascade
+
+Replay a recording at real-time pace through resident Nemotron and Parakeet
+workers:
+
+```bash
+just cascade-file recording.m4a
+scripts/cascade file recording.m4a --jsonl
+scripts/cascade file recording.m4a --audit recording.audit
+```
+
+Start live capture only when explicitly intended:
+
+```bash
+just cascade-live
+scripts/cascade live --source PIPEWIRE_NODE
+```
+
+Nemotron provides genuine provisional revisions and phrase finals. An on-time,
+nonempty Parakeet correction is authoritative; a worker failure, timeout,
+empty result, or full correction queue commits Nemotron with an explicit
+degradation reason. The container receives float PCM over standard input, no
+audio device, no network, and a read-only model mount. Persistence is disabled
+unless `--audit` names a nonexistent destination, and raw audio is never saved.
+See [`docs/interactive-cascade.md`](docs/interactive-cascade.md) for the event
+schema, scheduling rules, acceptance fixtures, and reviewed T14 results.
 
 ## Deterministic three-model ensemble
 
