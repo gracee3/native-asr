@@ -11,9 +11,10 @@ historical snapshots; they are not acceptance evidence for this cascade.
 Implemented and accepted on the T14 on 2026-08-10/11. The native C ABI worker,
 streaming adaptation, correction supervisor, canonical JSONL interface,
 default terminal viewer, opt-in audit bundle, and host live/file commands are
-complete. Both paced 100-utterance acceptance fixtures passed every gate. The
-pinned NeMo CLI's separate streaming-file adapter still emits no genuine
-partials; only the cascade worker's callback stream is acceptance evidence.
+complete. Both PipeWire-loopback 100-utterance acceptance fixtures passed every
+gate through the real live-capture path. The pinned NeMo CLI's separate
+streaming-file adapter still emits no genuine partials; only the cascade
+worker's callback stream is acceptance evidence.
 
 ## Product boundary
 
@@ -168,26 +169,31 @@ Both deterministic 100-utterance LibriSpeech subsets must use at least one
 second of silence between utterances and report Nemotron WER, committed WER,
 correction rate, transcript churn, degradation count, partial lag, correction
 lag, RTF, CPU, peak RSS, and thermals. Acceptance requires contiguous events,
-zero runtime failures or degraded segments in nominal paced runs, p95 partial
-lag at most 750 ms, every correction committed within 2.5 seconds, and committed
-WER no worse than Nemotron on either subset.
+ordered commits, zero runtime failures or degraded segments, exactly one load
+per model, no swap growth, p95 partial lag at most 750 ms, every correction
+committed within 2.5 seconds, committed WER no worse than Nemotron, and RTF from
+0.98 through 1.10 on either subset. PipeWire acceptance additionally requires
+no physical-device links and complete playback, capture, process, and virtual-
+node cleanup.
 
 ## Accepted T14 results
 
-The final image was
-`sha256:aaa251a769996379b3d83710316400beaaa1f3649c9efbcc20516262b8f6b681`.
-Both paced runs used the default 800 ms endpoint, 160 ms right context, 880 ms
-token-to-acoustic shift, 320 ms acoustic tail, and a 2.5 second correction
-deadline. They loaded each model once, showed new Nemotron provisional events
-while Parakeet corrections were active, and caused no swap growth.
+The release image was
+`sha256:a170c7810eb41f5d5f3ec5fb7022709aa3bf6276a04964473c98a76665217250`.
+Both runs used PipeWire 1.0.5, the default 800 ms endpoint, 160 ms right context,
+880 ms token-to-acoustic shift, 320 ms acoustic tail, and a 2.5 second correction
+deadline. They ran from clean revision `8f6ef4e`, loaded each model once, and
+caused no swap growth.
 
 | Fixture | Nemotron WER | Committed WER | Correction rate | Churn | Degraded | Partial p95 | Correction p95 / max | RTF | Peak RSS KiB | Package peak |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `test-clean`, 100 utterances | 5.14% | 4.61% | 28.57% | 5.19% | 0 | 56 ms | 667 / 1,060 ms | 1.002 | 1,736,156 | 100 C |
-| `test-other`, 100 utterances | 6.91% | 5.56% | 39.62% | 7.48% | 0 | 57 ms | 600 / 864 ms | 1.001 | 1,731,948 | 98 C |
+| `test-clean`, 100 utterances | 4.87% | 4.35% | 27.88% | 4.77% | 0 | 142 ms | 635 / 847 ms | 1.00076 | 1,735,916 | 100 C |
+| `test-other`, 100 utterances | 7.65% | 6.17% | 43.40% | 9.15% | 0 | 138 ms | 614 / 1,002 ms | 1.00081 | 1,736,400 | 98 C |
 
-The corresponding unpaced CPU-pressure runs also completed with zero
-degradations and the same WERs. Their RTFs were 0.415 and 0.444 respectively;
-they are stress evidence, not latency acceptance. Raw events, transcripts, and
-local audit bundles remain outside Git. Reviewed configuration and aggregate
+Every graph inspection found only the exact virtual source, virtual sink,
+`pw-play`, and `pw-record` links. Both playback and bounded capture completed,
+and cleanup verified that the uniquely named virtual nodes were absent. The
+earlier file-transport paced and unpaced runs remain regression and CPU-pressure
+evidence, not release acceptance. Raw events, transcripts, generated fixtures,
+and local audit bundles remain outside Git. Reviewed configuration and aggregate
 run identifiers are recorded in `docs/reproducibility-report.md`.

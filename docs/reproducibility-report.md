@@ -32,72 +32,75 @@ therefore reports an approximate 0.91-1.12 long-form RTF, before alignment and
 audit publication overhead. These are historical i7 planning estimates; a
 complete end-to-end T14 ensemble measurement remains a roadmap item.
 
-## 2026-08-10/11 accepted T14 interactive cascade
+## 2026-08-11 accepted T14 PipeWire cascade
 
 The CPU-only interactive cascade passed on an 11th Gen Intel Core i5-1145G7
 (four cores, eight logical CPUs), 16,454,795,264 bytes of RAM, Linux
-`7.0.0-28-generic`, and Docker `29.7.2`. The final NeMo image is
-`sha256:aaa251a769996379b3d83710316400beaaa1f3649c9efbcc20516262b8f6b681`,
-200,682,873 bytes, configured as `65532:65532`. Models were verified on the
+`7.0.0-28-generic`, Docker `29.7.2`, and PipeWire 1.0.5. The release NeMo image
+is `sha256:a170c7810eb41f5d5f3ec5fb7022709aa3bf6276a04964473c98a76665217250`,
+200,683,478 bytes, configured as `65532:65532`. Models were verified on the
 host, mounted read-only at `/models`, and run with `--network none`.
 
-The interactive acceptance fixture is distinct from the historical batch
-subset. For each split it ranks complete utterances by
-`abs(duration_seconds - 3.0)`, then by SHA-256 of `utterance_id`, and selects
-the first 100. This gives endpoint-sized speech while remaining deterministic:
+The interactive fixture is distinct from the historical batch subset. For each
+split it ranks complete utterances by `abs(duration_seconds - 3.0)`, then by
+SHA-256 of `utterance_id`, and selects the first 100. Schema 2 inserts 1,000 ms
+between utterances plus 1,000 ms at each boundary so startup scheduling cannot
+truncate speech:
 
-| Split | Speech duration range | Speech seconds | Reference words | Speakers | Fixture SHA-256 |
-|---|---:|---:|---:|---:|---|
-| `test-clean` | 2.885-3.110 s | 300.550 | 759 | 31 | `2ebdbe7ba9fe868a8a16cc97ff752eb36ac8f3b05ce305445bff2e2335ccb09a` |
-| `test-other` | 2.900-3.100 s | 300.490 | 810 | 28 | `01dac75ca1047a7a2e64bf729fa80fa90599f2281bffb22e79d911f7352c8211` |
+| Split | Speech range / seconds | Reference words / speakers | Total seconds | Fixture fingerprint | WAV SHA-256 |
+|---|---:|---:|---:|---|---|
+| `test-clean` | 2.885-3.110 / 300.550 | 759 / 31 | 401.550 | `fbdd1075b8c15482ff54036890343d14b498ba8f0d4ace1daa2c0f8102ff8344` | `6566df256de29100308f7ce33cbf43a763c8d7fdf0cdcb1bcf3fca163c31551c` |
+| `test-other` | 2.900-3.100 / 300.490 | 810 / 28 | 401.490 | `4e4a1f38bb0ed3505e2d757ba1e1c70ac61869cd2d71d9dfaa592156577bfc15` | `a6965170c4b9cfe0899e0964e6e8db32598671f789ab792bec9ad11c07be13f6` |
 
-Each fixture inserts 1,000 ms of silence between utterances, producing total
-durations of 399.550 and 399.490 seconds. Both runs used the default 800 ms
-endpoint, one 160 ms RNNT right-context frame, 880 ms token-to-acoustic shift,
-320 ms acoustic tail, 2.5 second correction deadline, one active correction,
-and one waiting correction. WER uses `english-upper-apostrophe-v1`.
+Both runs used the default 800 ms endpoint, one 160 ms RNNT right-context
+frame, 880 ms token-to-acoustic shift, 320 ms acoustic tail, 2.5 second
+correction deadline, one active correction, and one waiting correction. WER
+uses `english-upper-apostrophe-v1`.
 
-### Paced acceptance
+### PipeWire-loopback release acceptance
 
 | Split | External run ID | Segments / events | Nemotron WER | Committed WER | Corrected / rate | Churn | Degraded | Partial p95 | Correction p95 / max | RTF | CPU user+sys s | Peak RSS KiB | Package peak |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `test-clean` | `20260811T025807300649Z-librispeech-test-clean-100-paced` | 105 / 1,134 | 5.14% | 4.61% | 30 / 28.57% | 5.19% | 0 | 56 ms | 667 / 1,060 ms | 1.002 | 845.325 | 1,736,156 | 100 C |
-| `test-other` | `20260811T030456215565Z-librispeech-test-other-100-paced` | 106 / 1,160 | 6.91% | 5.56% | 42 / 39.62% | 7.48% | 0 | 57 ms | 600 / 864 ms | 1.001 | 842.137 | 1,731,948 | 98 C |
+| `test-clean` | `t14-v0.1.0-rerun-librispeech-test-clean-100-loopback` | 104 / 1,158 | 4.87% | 4.35% | 29 / 27.88% | 4.77% | 0 | 142 ms | 635 / 847 ms | 1.00076 | 854.126 | 1,735,916 | 100 C |
+| `test-other` | `t14-v0.1.0-rerun-librispeech-test-other-100-loopback` | 106 / 1,151 | 7.65% | 6.17% | 46 / 43.40% | 9.15% | 0 | 138 ms | 614 / 1,002 ms | 1.00081 | 852.049 | 1,736,400 | 98 C |
 
-Every acceptance boolean passed: contiguous global sequences, ordered commits,
-zero degraded segments, p95 partial lag at most 750 ms, every correction within
-2.5 seconds, and committed WER no worse than Nemotron. Each healthy session
-loaded Nemotron once and Parakeet once. New Nemotron provisional events occurred
-inside active Parakeet correction windows in both runs, directly confirming
-that first-pass decoding continued during correction. Swap use did not grow.
+Both summaries record clean revision
+`8f6ef4e4a2fcf7e3e5ed5a7fea164353ae4a57d2`. All 13 gates passed: contiguous
+events, ordered commits, zero degraded segments, p95 partial lag at most 750 ms,
+every correction within 2.5 seconds, committed WER no worse than Nemotron, RTF
+from 0.98 through 1.10, one load per model, no swap growth, complete playback
+and capture, no physical-device link, and complete virtual cleanup.
+
+The clean run used sink/source object IDs 80/119 with serials 3420/3419; the
+other run used IDs 93/123 with serials 3443/3442. Node names had independent
+randomized `native_asr_loopback_` prefixes. Graph inspections at creation,
+capture, simultaneous playback/capture, and post-playback found no physical or
+unknown endpoint. Both `pw-play` and bounded capture returned zero, `pw-loopback`
+exited cleanly, and post-cleanup inspection found neither virtual node. No
+captured PCM was written.
 
 The package temperature maxima are reported rather than hidden; there was no
-thermal acceptance threshold. RTF remained essentially real time. The audit
-directories were mode `0700` with `0600` files and contain events, result, and
-committed transcript only—never raw audio.
+thermal acceptance threshold. Audit directories are private and contain
+events, results, and committed text only. Raw events, audits, and generated
+public-corpus WAV fixtures remain external to Git.
 
-### Unpaced stress and selection boundary
+### Rejected run and regression evidence
 
-The matching unpaced runs
-`20260811T025211490373Z-librispeech-test-clean-100-unpaced` and
-`20260811T025503136187Z-librispeech-test-other-100-unpaced` completed with the
-same WERs, zero degradations, one load per model, no swap growth, and RTF 0.415
-and 0.444. They validate CPU-pressure stability but are not latency evidence.
+The first full loopback attempt,
+`t14-v0.1.0-librispeech-test-clean-100-loopback`, was rejected because a valid
+400 ms second endpoint for utterance `1089-134691-0018` produced an empty
+Parakeet correction and one degraded segment. The fix extended only short
+correction input with already buffered real context and added a bounded silence-
+padding retry. The specific utterance passed file and real virtual-source tests,
+then both complete fixtures were rerun from the clean revision reported above.
 
-A broader `--selection hash` clean fixture was also exercised and rejected as
-interactive acceptance evidence. Its long audiobook utterances were split into
-187 mid-sentence endpoint regions; committed WER was worse than Nemotron and it
-produced empty corrections. The hash mode remains available as an explicit
-stress test. It is not silently combined with the accepted endpoint-sized
-phrase fixture, and the separate three-model recorded-audio ensemble remains
-the supported long-form path.
-
-The benchmark summaries recorded the then-current `f27fdc2` revision with
-`dirty_tree=true` because the final worker retry and fixture policy were being
-validated before the third reviewable commit was amended. The image ID,
-fixture digests, commands, and external run IDs above identify the exact tested
-content. Raw local event streams, transcripts, and audit bundles were not
-committed.
+Earlier file-transport paced and unpaced runs remain regression and CPU-pressure
+evidence, not release acceptance. The unpaced RTFs were 0.415 and 0.444. A
+broader `--selection hash` clean fixture was also rejected as interactive
+acceptance evidence because long audiobook utterances split into 187 mid-
+sentence regions, worsened committed WER, and produced empty corrections. Hash
+selection remains an explicit stress test, while the three-model recorded-audio
+ensemble remains the supported long-form path.
 
 ## 2026-08-09 validated i7 state
 

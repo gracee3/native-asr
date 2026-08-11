@@ -4,6 +4,12 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd -- "$repo_root"
 
+if ! grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' VERSION ||
+   [[ $(wc -l < VERSION) -ne 1 ]]; then
+  printf '%s\n' 'error: VERSION must contain one semantic version' >&2
+  exit 1
+fi
+
 mapfile -t shell_files < <(
   find scripts tests docker -type f \
     ! -name Dockerfile \

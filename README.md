@@ -31,15 +31,16 @@ time.
 | Workflow | LibriSpeech `test-clean` WER | LibriSpeech `test-other` WER | Approximate RTF |
 |---|---:|---:|---:|
 | Long-form three-model ensemble | 1.78% | 3.28% | 0.91-1.12 sequential |
-| Interactive committed text | 4.61% | 5.56% | 1.00 paced; 0.42-0.44 unpaced |
+| Interactive committed text | 4.35% | 6.17% | 1.001 PipeWire loopback |
 
 These are engineering baselines, not universal accuracy claims. The ensemble
 WER comes from deterministic 100-utterance snapshots; its RTF is the sum of the
 three sequential model passes on the historical i7 benchmark host and excludes
-small alignment/audit overhead. The interactive results use separate
-endpoint-sized 100-utterance fixtures on the T14. The two WER rows therefore
-describe their intended workloads and are not a head-to-head comparison. Full
-provenance and limitations are in the
+small alignment/audit overhead. The interactive results use separate endpoint-
+sized 100-utterance fixtures played through isolated PipeWire virtual nodes
+into the real live-capture path on the T14. The two WER rows therefore describe
+their intended workloads and are not a head-to-head comparison. Full provenance
+and limitations are in the
 [reproducibility report](docs/reproducibility-report.md).
 
 ## Long-form: three-model consensus
@@ -187,6 +188,7 @@ just bench nemo:parakeet-tdt-v3 recording.m4a
 just datasets
 just prepare-datasets
 just benchmark-set whisper:small.en librispeech-test-clean
+just cascade-loopback librispeech-test-clean
 ```
 
 Detailed nine-model tables, full-split checkpoints, image identities, rejected
@@ -203,6 +205,7 @@ public-corpus snapshots, not in this README.
 - [Reproducibility report](docs/reproducibility-report.md) — complete results and limitations
 - [Licensing](docs/licensing.md) — repository and third-party licensing boundaries
 - [Roadmap](docs/roadmap.md) — measured next steps without changing current guarantees
+- [Changelog](CHANGELOG.md) — release history, accepted results, and limitations
 - [Historical i7 benchmark campaign](docs/history/2026-08-09-i7-benchmark-campaign.md)
 
 Private recordings, transcripts, downloaded weights, and ordinary local

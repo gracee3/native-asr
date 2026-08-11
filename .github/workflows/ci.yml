@@ -1,0 +1,30 @@
+name: Host checks
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install host check dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes just jq ripgrep
+      - name: Run repository checks
+        run: ./scripts/check
+      - name: Check Markdown links
+        run: ./scripts/check-markdown-links
+      - name: Check patch whitespace
+        run: git diff --check
