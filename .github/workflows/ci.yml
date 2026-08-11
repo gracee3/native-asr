@@ -21,7 +21,7 @@ jobs:
       - name: Install host check dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes just jq ripgrep
+          sudo apt-get install --yes ffmpeg just jq ripgrep
       - name: Run repository checks
         run: ./scripts/check
       - name: Check Markdown links
