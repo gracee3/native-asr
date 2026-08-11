@@ -128,6 +128,8 @@ overhead, not a measured T14 end-to-end ensemble result. Exact constituent
 records and comparison limits are in the
 [`reproducibility report`](reproducibility-report.md).
 
-Local-LLM adjudication, richer progress events, controlled concurrency,
-persistent ensemble workers, and GPU scheduling remain optional future work;
-see the [`roadmap`](roadmap.md).
+LLM adjudication is not planned: deterministic consensus, explicit fallback,
+and preserved disagreement evidence are product guarantees rather than an
+intermediate stage for generated rewriting. Richer progress events, controlled
+concurrency, persistent ensemble workers, and GPU scheduling are outside the
+current milestone; see the [`roadmap`](roadmap.md).

@@ -22,6 +22,18 @@ build-whisper:
 # Build every currently implemented runtime image.
 build: build-sherpa build-nemo build-moonshine build-whisper
 
+# Build and fetch the three locked defaults for recorded-audio consensus.
+setup-long-form: build-nemo build-sherpa build-whisper
+    @./scripts/models fetch nemo:parakeet-tdt-v3 sherpa:parakeet-unified-en whisper:small.en
+
+# Build and fetch the two locked defaults for the interactive cascade.
+setup-streaming: build-nemo
+    @./scripts/models fetch nemo:nemotron-streaming-en nemo:parakeet-tdt-v3
+
+# Diagnose one workflow without downloading or building (all, long-form, streaming).
+doctor profile="all":
+    @./scripts/doctor {{ quote(profile) }}
+
 # Run host-side syntax, manifest, policy, and wrapper smoke tests.
 check:
     @./scripts/check

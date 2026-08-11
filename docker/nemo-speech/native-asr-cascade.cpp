@@ -409,6 +409,8 @@ class Cascade {
         parakeet_.start();
         session_start_ = Clock::now();
         sample_resources();
+        std::fprintf(stderr, "cascade: ready\n");
+        std::fflush(stderr);
 
         const int input_flags = ::fcntl(STDIN_FILENO, F_GETFL, 0);
         if (input_flags >= 0)

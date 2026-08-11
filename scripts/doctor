@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=scripts/lib/paths.sh
+source "$repo_root/scripts/lib/paths.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/doctor [all|long-form|streaming]
+
+Checks the selected workflow without downloading models or building images.
+Exit status is 0 when ready, 1 when requirements are missing or invalid, and
+2 for invalid usage.
+EOF
+}
+
+if (($# > 1)); then
+  usage >&2
+  exit 2
+fi
+profile=${1:-all}
+case $profile in
+  all|long-form|streaming) ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+
+docker_bin=${DOCKER_BIN:-docker}
+verify_models_bin=${NATIVE_ASR_VERIFY_MODELS_BIN:-$repo_root/scripts/verify-models}
+pw_cli_bin=${PW_CLI_BIN:-pw-cli}
+pw_record_bin=${PW_RECORD_BIN:-pw-record}
+min_free_bytes=${NATIVE_ASR_DOCTOR_MIN_FREE_BYTES:-1073741824}
+failures=0
+
+ok() {
+  printf 'ok       %s\n' "$*"
+}
+
+problem() {
+  printf 'MISSING  %s\n' "$*" >&2
+  failures=$((failures + 1))
+}
+
+invalid() {
+  printf 'INVALID  %s\n' "$*" >&2
+  failures=$((failures + 1))
+}
+
+check_tool() {
+  local tool=$1
+  if command -v "$tool" >/dev/null 2>&1; then
+    ok "tool $tool"
+  else
+    problem "tool $tool"
+  fi
+}
+
+check_storage() {
+  local label=$1 requested=$2 writable=${3:-true} anchor=$2 available
+  while [[ ! -e $anchor && $anchor != / ]]; do
+    anchor=$(dirname -- "$anchor")
+  done
+  if [[ ! -d $anchor ]]; then
+    problem "$label storage path has no existing parent: $requested"
+    return
+  fi
+  if [[ $writable == true && -e $requested && ! -w $requested ]]; then
+    invalid "$label storage path is not writable: $requested"
+    return
+  fi
+  if [[ $writable == true && ! -e $requested && ! -w $anchor ]]; then
+    invalid "$label storage parent is not writable: $anchor"
+    return
+  fi
+  available=$(df -B1 --output=avail "$anchor" 2>/dev/null | awk 'NR == 2 {print $1}')
+  if [[ ! $available =~ ^[0-9]+$ ]]; then
+    invalid "cannot determine free space for $label storage: $anchor"
+  elif ((available < min_free_bytes)); then
+    invalid "$label storage has ${available} bytes free; need at least ${min_free_bytes}: $anchor"
+  else
+    ok "$label storage ${available} bytes free at $anchor"
+  fi
+}
+
+for tool in bash just git "$docker_bin" ffmpeg python3 curl sha256sum realpath; do
+  check_tool "$tool"
+done
+if [[ $profile == all || $profile == long-form ]]; then
+  check_tool tar
+  check_tool bzip2
+fi
+if [[ $profile == all || $profile == streaming ]]; then
+  check_tool "$pw_record_bin"
+  check_tool "$pw_cli_bin"
+fi
+
+host_arch=$(uname -m 2>/dev/null || true)
+if [[ $host_arch == x86_64 ]]; then
+  ok 'host architecture x86_64'
+else
+  invalid "unsupported host architecture: ${host_arch:-unknown} (expected x86_64)"
+fi
+
+docker_ready=false
+docker_root=''
+if command -v "$docker_bin" >/dev/null 2>&1 && "$docker_bin" info >/dev/null 2>&1; then
+  docker_ready=true
+  ok 'Docker daemon reachable'
+  docker_root=$("$docker_bin" info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+else
+  problem 'Docker daemon is not reachable'
+fi
+
+check_storage models "$NATIVE_ASR_MODELS"
+check_storage cache "$NATIVE_ASR_CACHE"
+if [[ -n $docker_root ]]; then
+  check_storage Docker "$docker_root" false
+fi
+
+models=()
+images=()
+if [[ $profile == all || $profile == long-form ]]; then
+  models+=(
+    nemo:parakeet-tdt-v3
+    sherpa:parakeet-unified-en
+    whisper:small.en
+  )
+  images+=(asr-nemo-speech asr-sherpa-onnx asr-whisper-cpp)
+fi
+if [[ $profile == all || $profile == streaming ]]; then
+  models+=(nemo:nemotron-streaming-en)
+  if [[ $profile == streaming ]]; then
+    models+=(nemo:parakeet-tdt-v3)
+    images+=(asr-nemo-speech)
+  fi
+fi
+
+if [[ ! -r $repo_root/manifests/models.lock ]]; then
+  problem "locked model manifest: $repo_root/manifests/models.lock"
+elif [[ ! -x $verify_models_bin ]]; then
+  problem "model verifier: $verify_models_bin"
+elif "$verify_models_bin" "${models[@]}"; then
+  ok "locked artifacts for $profile"
+else
+  invalid "locked artifacts for $profile"
+fi
+
+if [[ $docker_ready == true ]]; then
+  for image in "${images[@]}"; do
+    image_arch=$("$docker_bin" image inspect "$image" --format '{{.Architecture}}' 2>/dev/null || true)
+    if [[ $image_arch == amd64 ]]; then
+      ok "image $image (amd64)"
+    elif [[ -z $image_arch ]]; then
+      problem "image $image (run the matching setup command)"
+    else
+      invalid "image $image architecture $image_arch (expected amd64)"
+    fi
+  done
+fi
+
+if [[ $profile == all || $profile == streaming ]]; then
+  if command -v "$pw_cli_bin" >/dev/null 2>&1 && "$pw_cli_bin" info 0 >/dev/null 2>&1; then
+    pipewire_version=$("$pw_record_bin" --version 2>&1 | awk 'NR == 2 {print $NF}')
+    ok "PipeWire user session reachable${pipewire_version:+ (tools $pipewire_version)}"
+  else
+    problem 'PipeWire user session is not reachable'
+  fi
+fi
+
+if ((failures)); then
+  printf 'doctor: %s is not ready (%d problem%s)\n' \
+    "$profile" "$failures" "$([[ $failures == 1 ]] || printf s)" >&2
+  exit 1
+fi
+
+printf 'doctor: %s ready\n' "$profile"

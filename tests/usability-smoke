@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-usability.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+mkdir -p "$work/bin" "$work/models" "$work/cache" "$work/docker-root"
+
+cat > "$work/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DOCTOR_DOCKER_LOG"
+case ${1:-} in
+  info)
+    if [[ ${2:-} == --format ]]; then
+      printf '%s\n' "$DOCTOR_DOCKER_ROOT"
+    fi
+    ;;
+  image)
+    [[ ${2:-} == inspect ]]
+    printf '%s\n' amd64
+    ;;
+  *) exit 3 ;;
+esac
+EOF
+cat > "$work/bin/verify" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DOCTOR_VERIFY_LOG"
+[[ ${DOCTOR_VERIFY_FAIL:-0} == 0 ]]
+EOF
+cat > "$work/bin/pw-cli" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DOCTOR_PIPEWIRE_LOG"
+[[ ${1:-} == info && ${2:-} == 0 ]]
+EOF
+cat > "$work/bin/pw-record" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${1:-} == --version ]]; then
+  printf '%s\n' 'pw-record' 'Compiled with libpipewire 1.test'
+  exit 0
+fi
+exit 3
+EOF
+chmod +x "$work/bin/"*
+
+export DOCKER_BIN=$work/bin/docker
+export NATIVE_ASR_VERIFY_MODELS_BIN=$work/bin/verify
+export PW_CLI_BIN=$work/bin/pw-cli
+export PW_RECORD_BIN=$work/bin/pw-record
+export NATIVE_ASR_MODELS=$work/models
+export NATIVE_ASR_CACHE=$work/cache
+export NATIVE_ASR_DOCTOR_MIN_FREE_BYTES=1
+export DOCTOR_DOCKER_ROOT=$work/docker-root
+export DOCTOR_DOCKER_LOG=$work/docker.log
+export DOCTOR_VERIFY_LOG=$work/verify.log
+export DOCTOR_PIPEWIRE_LOG=$work/pipewire.log
+
+set +e
+"$repo_root/scripts/doctor" unknown > "$work/usage.stdout" 2> "$work/usage.stderr"
+usage_status=$?
+set -e
+[[ $usage_status == 2 ]]
+grep -Fq 'Usage: scripts/doctor' "$work/usage.stderr"
+
+: > "$work/docker.log"
+: > "$work/verify.log"
+"$repo_root/scripts/doctor" long-form > "$work/long.stdout"
+grep -Fqx 'doctor: long-form ready' "$work/long.stdout"
+grep -Fqx 'nemo:parakeet-tdt-v3 sherpa:parakeet-unified-en whisper:small.en' \
+  "$work/verify.log"
+grep -Fq 'asr-nemo-speech' "$work/docker.log"
+grep -Fq 'asr-sherpa-onnx' "$work/docker.log"
+grep -Fq 'asr-whisper-cpp' "$work/docker.log"
+[[ ! -e $work/pipewire.log ]]
+
+: > "$work/docker.log"
+: > "$work/verify.log"
+"$repo_root/scripts/doctor" streaming > "$work/streaming.stdout"
+grep -Fqx 'doctor: streaming ready' "$work/streaming.stdout"
+grep -Fqx 'nemo:nemotron-streaming-en nemo:parakeet-tdt-v3' "$work/verify.log"
+grep -Fq 'asr-nemo-speech' "$work/docker.log"
+grep -Fq 'PipeWire user session reachable' "$work/streaming.stdout"
+
+: > "$work/verify.log"
+"$repo_root/scripts/doctor" all > "$work/all.stdout"
+grep -Fqx 'doctor: all ready' "$work/all.stdout"
+grep -Fqx \
+  'nemo:parakeet-tdt-v3 sherpa:parakeet-unified-en whisper:small.en nemo:nemotron-streaming-en' \
+  "$work/verify.log"
+
+set +e
+DOCTOR_VERIFY_FAIL=1 "$repo_root/scripts/doctor" long-form \
+  > "$work/failure.stdout" 2> "$work/failure.stderr"
+failure_status=$?
+set -e
+[[ $failure_status == 1 ]]
+grep -Fq 'INVALID  locked artifacts for long-form' "$work/failure.stderr"
+grep -Fq 'doctor: long-form is not ready' "$work/failure.stderr"
+
+just --justfile "$repo_root/Justfile" --dry-run setup-long-form > "$work/setup-long.txt" 2>&1
+grep -Fq 'docker/nemo-speech/Dockerfile' "$work/setup-long.txt"
+grep -Fq 'docker/sherpa-onnx/Dockerfile' "$work/setup-long.txt"
+grep -Fq 'docker/whisper-cpp/Dockerfile' "$work/setup-long.txt"
+grep -Fq 'nemo:parakeet-tdt-v3 sherpa:parakeet-unified-en whisper:small.en' \
+  "$work/setup-long.txt"
+! grep -Fq 'docker/moonshine/Dockerfile' "$work/setup-long.txt"
+
+just --justfile "$repo_root/Justfile" --dry-run setup-streaming > "$work/setup-streaming.txt" 2>&1
+grep -Fq 'docker/nemo-speech/Dockerfile' "$work/setup-streaming.txt"
+grep -Fq 'nemo:nemotron-streaming-en nemo:parakeet-tdt-v3' "$work/setup-streaming.txt"
+! grep -Fq 'docker/sherpa-onnx/Dockerfile' "$work/setup-streaming.txt"
+
+printf '%s\n' 'usability smoke: ok'

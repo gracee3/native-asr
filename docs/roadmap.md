@@ -1,48 +1,60 @@
 # Roadmap
 
-`native-asr` now has two supported CPU workflows:
+`native-asr` has two supported CPU workflows:
 
 1. the deterministic three-model ensemble for recorded audio; and
 2. the persistent Nemotron-to-Parakeet cascade for interactive English speech.
 
-Roadmap work must preserve those commands and their provenance, privacy, and
-failure semantics. Experimental features should remain optional until they have
-repeatable acceptance evidence.
+Roadmap work preserves their provenance, privacy, deterministic failure
+semantics, and headless command interfaces. Existing locked model aliases stay
+available for reproducibility and direct use, but model-catalog expansion,
+diarization, and LLM adjudication are not planned.
 
-## Highest-value measurements
+## Release gate
+
+The T14 remains the sole acceptance host for `v0.1.0`. The release requires
+both deterministic 100-utterance LibriSpeech fixtures to pass through an
+isolated PipeWire virtual source, using the real live-capture path without
+activating a physical microphone. File replay remains useful regression
+evidence but cannot substitute for that gate.
+
+Acceptance artifacts, audio fixtures, event streams, and audit bundles remain
+external to Git. Only reviewed aggregate configuration and results may be
+committed. Any runtime, model, endpointing, capture, or host change requires the
+two loopback fixtures to be repeated before another release claim.
+
+## Next milestone: streaming-first Rust TUI
+
+The first post-release milestone is a small Rust terminal client for the
+existing canonical JSONL protocol. It will provide:
+
+- explicit session start and stop;
+- PipeWire source enumeration and deliberate source selection;
+- visibly distinct provisional and committed text;
+- current latency and degradation status; and
+- optional audit-bundle selection, disabled by default.
+
+The TUI is a client, not another inference runtime. It will not embed ASR,
+rewrite or edit transcript text, invoke an LLM, infer speakers, or perform
+diarization. The headless `scripts/cascade` interface remains supported and is
+the source of truth for event and failure semantics.
+
+## Measurement backlog
 
 - Measure the complete three-model ensemble end to end on the current T14,
   including verification, all model passes, alignment, publication, aggregate
   RSS, CPU, and thermals. The current 0.91-1.12 RTF is a historical i7 planning
-  estimate from summed constituent runs, not a T14 end-to-end result.
-- Extend public long-form validation beyond the deterministic 100-utterance
-  snapshots without silently mixing segmentation policies or private audio.
-- Repeat interactive acceptance after runtime, model, endpointing, or host
-  changes; keep paced latency evidence separate from unpaced throughput.
+  estimate, not a T14 end-to-end result.
+- Extend public long-form validation beyond deterministic 100-utterance
+  snapshots without silently changing segmentation policy.
+- Measure controlled two-worker long-form scheduling only after a clean
+  sequential T14 baseline; shared CPU, cache, bandwidth, and thermals make a
+  speedup uncertain.
+- Add richer truthful progress events where a runtime exposes useful progress.
 
-## Long-form candidates
+## Outside active planning
 
-- Keep model workers persistent across long jobs where runtime APIs permit it.
-- Measure controlled two-worker scheduling only after a clean sequential T14
-  baseline. CPU, cache, memory bandwidth, and thermals are shared, so parallel
-  inference is not assumed to be faster.
-- Consider optional local-LLM adjudication only for bounded three-way
-  disagreement regions. Agreed text and the deterministic consensus must remain
-  available and unchanged by default.
-- Add richer progress events without inventing percentages for runtimes that do
-  not expose them.
-
-## Interactive candidates
-
-- Evaluate the multilingual Nemotron 3.5 model as a separate profile rather
-  than changing the accepted English defaults.
-- Build richer clients, including a possible Rust TUI, on the canonical JSONL
-  event protocol. Inference and durable output remain headless engine concerns.
-- Add live controls only as explicit user actions; automated tests must continue
-  to use paced public audio and never activate a microphone.
-
-## Outside the current guarantees
-
-GPU execution, diarization, transcript editing, web synchronization,
-reconnectable background services, and unrestricted multi-model concurrency are
-not part of the current supported milestone.
+Additional models, diarization, LLM adjudication, transcript editing, GPU
+execution, web synchronization, reconnectable background services, and
+unrestricted multi-model concurrency are not part of the current or next
+milestone.

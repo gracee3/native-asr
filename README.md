@@ -63,17 +63,12 @@ Two matching token or deletion votes decide each aligned position. A three-way
 disagreement falls back to the NeMo anchor and remains explicitly marked in the
 audit data. No language model silently rewrites agreed text.
 
-Build the three native runtime images, fetch the locked models, and transcribe:
+Set up the three native runtime images and locked models, verify the host, and
+transcribe:
 
 ```bash
-just build-nemo
-just build-sherpa
-just build-whisper
-
-just model nemo:parakeet-tdt-v3
-just model sherpa:parakeet-unified-en
-just model whisper:small.en
-
+just setup-long-form
+just doctor long-form
 just ensemble recording.m4a recording.audit
 ```
 
@@ -106,12 +101,12 @@ authoritative when it returns nonempty text within 2.5 seconds. A failure,
 timeout, empty result, or full correction queue commits the Nemotron phrase with
 an explicit degradation reason instead of blocking the stream.
 
-Build the native NeMo image and fetch both models:
+Build the native NeMo image, fetch both models, and verify live-capture
+requirements:
 
 ```bash
-just build-nemo
-just model nemo:nemotron-streaming-en
-just model nemo:parakeet-tdt-v3
+just setup-streaming
+just doctor streaming
 ```
 
 Replay a file at real-time pace:
@@ -145,7 +140,13 @@ and tests, but it is not present in deployed inference images.
 git clone https://github.com/gracee3/native-asr.git
 cd native-asr
 just check
+just doctor all
 ```
+
+`scripts/doctor [all|long-form|streaming]` is read-only: it reports missing
+tools, an unreachable Docker or PipeWire session, unsupported architecture,
+insufficient free space, invalid locked artifacts, and missing or wrong-
+architecture images. It returns `0` only when the selected workflow is ready.
 
 Large artifacts default to a dedicated `/data` filesystem:
 

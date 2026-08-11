@@ -29,9 +29,11 @@ The English interactive path is a two-pass cascade:
 
 The deterministic three-model recorded-audio ensemble remains a separate
 offline feature. It is not called from the interactive critical path.
-Nemotron 3.5 is reserved for a later multilingual milestone. Rust UI work,
-local-LLM adjudication, diarization, GPU execution, and additional full-corpus
-benchmarking are out of scope.
+All existing aliases remain supported for direct and reproducibility use, but
+additional-model work is shelved. LLM adjudication and diarization are not
+planned. A bounded streaming-first Rust TUI client is the next milestone after
+`v0.1.0`; GPU execution and additional full-corpus benchmarking remain outside
+the current release.
 
 ## Runtime shape
 
@@ -48,6 +50,12 @@ PortAudio or PipeWire device access. The default live command selects a
 PipeWire source on the host and pipes normalized samples over standard input.
 The deterministic file command uses the same input protocol with optional
 real-time pacing. Neither path saves raw microphone or normalized PCM.
+
+The supervisor emits the stable `cascade: ready` diagnostic on stderr only
+after both model workers report that their weights are loaded. Host capture or
+file conversion starts after this signal. Failure or timeout before readiness
+therefore cannot consume microphone audio or silently drop the beginning of a
+session.
 
 Nemotron uses 160 ms right context, word timing, genuine incremental results,
 and token-silence endpointing. The endpoint silence threshold defaults to
@@ -121,9 +129,11 @@ just cascade-live
 just cascade-file AUDIO
 ```
 
-Live capture is never invoked by repository checks or automated acceptance.
-Public audio with at least one second of silence between utterances is used for
-paced interactive validation.
+Ordinary repository checks never invoke live capture. Automated release
+acceptance uses a uniquely named isolated PipeWire virtual source and public
+audio, never the default source or a physical microphone. Fixtures include at
+least one second of silence between utterances and one second of boundary
+silence.
 
 `scripts/cascade-benchmark` defaults to the reproducible `phrase` selection:
 complete utterances ranked by distance from three seconds, with SHA-256 of the

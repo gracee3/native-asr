@@ -31,9 +31,11 @@ ledgers must not be attached to issues or committed.
 ## Scope
 
 The supported user workflows are the deterministic long-form ensemble and the
-interactive Nemotron-to-Parakeet cascade. New runtimes and experimental UI,
-concurrency, multilingual, diarization, or LLM work should remain optional and
-must not weaken either workflow's current guarantees.
+interactive Nemotron-to-Parakeet cascade. Existing aliases remain supported,
+but additional models, diarization, and LLM adjudication are not active roadmap
+work. Experimental concurrency or multilingual changes must not weaken either
+workflow's current guarantees. The next product milestone is the bounded Rust
+TUI client described in the roadmap.
 
 By contributing, you agree that your contribution is licensed under the
 repository's [MIT License](LICENSE).

@@ -26,7 +26,8 @@ run_cascade() {
       --nemotron fake-nemotron --parakeet fake-parakeet
 }
 
-run_cascade "$work/success.jsonl" 4 > "$work/success.jsonl"
+run_cascade "$work/success.jsonl" 4 > "$work/success.jsonl" 2> "$work/success.stderr"
+grep -Fqx 'cascade: ready' "$work/success.stderr"
 jq -s -e '
   ([.[].sequence] == [range(0; length)])
   and ([.[] | select(.state == "committed") | .segment_id] == [0, 1])

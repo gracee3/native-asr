@@ -107,3 +107,8 @@ workflows share the Parakeet artifact but not a scheduler: the three-model
 recorded-audio ensemble is never called from the interactive critical path. No
 role changes the storage rule: every weight file stays host-managed and is
 mounted read-only rather than copied into an image.
+
+All existing locked aliases remain available for direct transcription and
+reproducibility work. Adding models is shelved: the active roadmap is client
+delivery for the accepted long-form and English streaming defaults, not model
+catalog expansion. Diarization and LLM adjudication are likewise not planned.

@@ -10,6 +10,7 @@ ffmpeg_bin=${FFMPEG_BIN:-ffmpeg}
 pw_record_bin=${PW_RECORD_BIN:-pw-record}
 verify_models_bin=${NATIVE_ASR_VERIFY_MODELS_BIN:-$repo_root/scripts/verify-models}
 image=${NATIVE_ASR_NEMO_IMAGE:-asr-nemo-speech}
+ready_timeout_seconds=${NATIVE_ASR_CASCADE_READY_TIMEOUT_SECONDS:-180}
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -38,6 +39,11 @@ Audio is normalized on the host to raw 16 kHz mono float PCM and streamed over
 stdin. The container receives no audio device and neither mode saves raw audio.
 EOF
 }
+
+if (($# >= 1)) && [[ $1 == --help || $1 == -h ]]; then
+  usage
+  exit 0
+fi
 
 (($# >= 1)) || {
   usage >&2
@@ -97,6 +103,9 @@ while (($#)); do
   esac
 done
 
+[[ $ready_timeout_seconds =~ ^[1-9][0-9]*$ ]] || \
+  die 'NATIVE_ASR_CASCADE_READY_TIMEOUT_SECONDS must be a positive integer'
+
 if [[ $mode == file ]]; then
   [[ -r $audio ]] || die "audio input is not readable: $audio"
   audio=$(realpath -e -- "$audio")
@@ -136,20 +145,103 @@ docker_args+=("$image" cascade "${cascade_args[@]}")
 
 if [[ $mode == live ]]; then
   command -v "$pw_record_bin" >/dev/null || die "PipeWire recorder not found: $pw_record_bin"
-  capture_args=(--rate 16000 --channels 1 --channel-map mono --format f32 --latency 160ms)
-  [[ -z $source_node ]] || capture_args+=(--target "$source_node")
-  "$pw_record_bin" "${capture_args[@]}" - |
-    "$docker_bin" "${docker_args[@]}"
-  exit
+else
+  command -v "$ffmpeg_bin" >/dev/null || die "FFmpeg not found: $ffmpeg_bin"
 fi
 
-command -v "$ffmpeg_bin" >/dev/null || die "FFmpeg not found: $ffmpeg_bin"
-ffmpeg_args=(-nostdin -hide_banner -loglevel error)
-ffmpeg_args+=(
-  -i "$audio" -map_metadata -1 -vn -sn -dn
-  -ar 16000 -ac 1 -c:a pcm_f32le -f f32le pipe:1
-)
-# The supervisor owns pacing so its clock starts only after both models are
-# resident; FFmpeg cannot silently catch up while the container is loading.
-"$ffmpeg_bin" "${ffmpeg_args[@]}" |
-  "$docker_bin" "${docker_args[@]}"
+runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-cascade.XXXXXX")
+audio_fifo=$runtime_dir/audio.fifo
+ready_marker=$runtime_dir/ready
+mkfifo -- "$audio_fifo"
+docker_pid=''
+producer_pid=''
+audio_fd=''
+
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [[ -n $producer_pid ]] && kill -0 "$producer_pid" 2>/dev/null; then
+    kill -TERM "$producer_pid" 2>/dev/null || true
+    wait "$producer_pid" 2>/dev/null || true
+  fi
+  if [[ -n $audio_fd ]]; then
+    exec {audio_fd}>&-
+  fi
+  if [[ -n $docker_pid ]] && kill -0 "$docker_pid" 2>/dev/null; then
+    kill -TERM "$docker_pid" 2>/dev/null || true
+    wait "$docker_pid" 2>/dev/null || true
+  fi
+  rm -rf -- "$runtime_dir"
+  exit "$status"
+}
+
+cancel() {
+  printf '%s\n' 'cascade: cancelled' >&2
+  exit 130
+}
+
+relay_stderr() {
+  local line
+  while IFS= read -r line || [[ -n $line ]]; do
+    printf '%s\n' "$line" >&2
+    if [[ $line == 'cascade: ready' ]]; then
+      : > "$ready_marker"
+    fi
+  done
+}
+
+trap cleanup EXIT
+trap cancel INT TERM
+
+"$docker_bin" "${docker_args[@]}" < "$audio_fifo" 2> >(relay_stderr) &
+docker_pid=$!
+# Opening the writer releases the Docker process's FIFO redirection while
+# retaining an empty input stream during model startup.
+exec {audio_fd}> "$audio_fifo"
+
+ready_deadline=$((SECONDS + ready_timeout_seconds))
+while [[ ! -e $ready_marker ]]; do
+  if ! kill -0 "$docker_pid" 2>/dev/null; then
+    wait "$docker_pid" 2>/dev/null || true
+    docker_pid=''
+    printf '%s\n' 'cascade: runtime exited before readiness' >&2
+    exit 1
+  fi
+  if ((SECONDS >= ready_deadline)); then
+    printf 'cascade: readiness timed out after %s seconds\n' "$ready_timeout_seconds" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+
+if [[ $mode == live ]]; then
+  capture_args=(--rate 16000 --channels 1 --channel-map mono --format f32 --latency 160ms)
+  [[ -z $source_node ]] || capture_args+=(--target "$source_node")
+  "$pw_record_bin" "${capture_args[@]}" - >&$audio_fd &
+else
+  ffmpeg_args=(-nostdin -hide_banner -loglevel error)
+  ffmpeg_args+=(
+    -i "$audio" -map_metadata -1 -vn -sn -dn
+    -ar 16000 -ac 1 -c:a pcm_f32le -f f32le pipe:1
+  )
+  # The supervisor owns pacing and its clock starts only after both models are
+  # resident, so file conversion cannot consume the startup interval.
+  "$ffmpeg_bin" "${ffmpeg_args[@]}" >&$audio_fd &
+fi
+producer_pid=$!
+
+producer_status=0
+wait "$producer_pid" || producer_status=$?
+producer_pid=''
+exec {audio_fd}>&-
+audio_fd=''
+if ((producer_status != 0)); then
+  printf 'cascade: %s failed with status %s\n' \
+    "$([[ $mode == live ]] && printf capture || printf conversion)" "$producer_status" >&2
+  exit 1
+fi
+
+docker_status=0
+wait "$docker_pid" || docker_status=$?
+docker_pid=''
+exit "$docker_status"

@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-cascade-wrapper.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
-mkdir -p "$work/bin" "$work/models/nemo-speech"
+mkdir -p "$work/bin" "$work/models/nemo-speech" "$work/tmp"
 : > "$work/audio.wav"
 
 cat > "$work/bin/verify" <<'EOF'
@@ -14,17 +14,40 @@ EOF
 cat > "$work/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$CASCADE_DOCKER_LOG"
-cat >/dev/null
+printf '%s\n' "$$" > "$CASCADE_DOCKER_PID_LOG"
+printf '%s\n' 'docker-start' >> "$CASCADE_ORDER_LOG"
+case ${CASCADE_FAKE_DOCKER_MODE:-ready} in
+  ready)
+    printf '%s\n' 'docker-ready' >> "$CASCADE_ORDER_LOG"
+    printf '%s\n' 'cascade: ready' >&2
+    exec cat >/dev/null
+    ;;
+  never-ready)
+    exec sleep 30
+    ;;
+  exit-before-ready)
+    exit 23
+    ;;
+  *) exit 24 ;;
+esac
 EOF
 cat > "$work/bin/ffmpeg" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$CASCADE_FFMPEG_LOG"
+printf '%s\n' 'conversion-start' >> "$CASCADE_ORDER_LOG"
 dd if=/dev/zero bs=10240 count=1 status=none
 EOF
 cat > "$work/bin/pw-record" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$CASCADE_PW_LOG"
-exit 19
+printf '%s\n' "$$" > "$CASCADE_CAPTURE_PID_LOG"
+printf '%s\n' 'capture-start' >> "$CASCADE_ORDER_LOG"
+case ${CASCADE_FAKE_CAPTURE_MODE:-bounded} in
+  bounded) dd if=/dev/zero bs=10240 count=1 status=none ;;
+  failure) exit 19 ;;
+  blocking) exec sleep 30 ;;
+  *) exit 20 ;;
+esac
 EOF
 chmod +x "$work/bin/verify" "$work/bin/docker" "$work/bin/ffmpeg" "$work/bin/pw-record"
 
@@ -33,10 +56,18 @@ export NATIVE_ASR_VERIFY_MODELS_BIN=$work/bin/verify
 export DOCKER_BIN=$work/bin/docker
 export FFMPEG_BIN=$work/bin/ffmpeg
 export PW_RECORD_BIN=$work/bin/pw-record
+export TMPDIR=$work/tmp
 export CASCADE_VERIFY_LOG=$work/verify.log
 export CASCADE_DOCKER_LOG=$work/docker.log
+export CASCADE_DOCKER_PID_LOG=$work/docker.pid
 export CASCADE_FFMPEG_LOG=$work/ffmpeg.log
 export CASCADE_PW_LOG=$work/pw.log
+export CASCADE_CAPTURE_PID_LOG=$work/capture.pid
+export CASCADE_ORDER_LOG=$work/order.log
+
+"$repo_root/scripts/cascade" --help > "$work/help.stdout"
+grep -Fq 'scripts/cascade live' "$work/help.stdout"
+"$repo_root/scripts/cascade" -h >/dev/null
 
 "$repo_root/scripts/cascade" file "$work/audio.wav" --jsonl --audit "$work/file.audit"
 grep -Fqx 'nemo:nemotron-streaming-en' "$work/verify.log"
@@ -48,16 +79,50 @@ grep -Fqx "type=bind,src=$work/models/nemo-speech,dst=/models,readonly" "$work/d
 ! grep -Fqx -- '-re' "$work/ffmpeg.log"
 grep -Fqx -- '--pace' "$work/docker.log"
 grep -Fqx '/audit/file.audit' "$work/docker.log"
+[[ $(sed -n '1p' "$work/order.log") == docker-start ]]
+[[ $(sed -n '2p' "$work/order.log") == docker-ready ]]
+[[ $(sed -n '3p' "$work/order.log") == conversion-start ]]
 
 : > "$work/verify.log"
-if "$repo_root/scripts/cascade" live --source test-source --jsonl \
+: > "$work/order.log"
+if CASCADE_FAKE_CAPTURE_MODE=failure \
+    "$repo_root/scripts/cascade" live --source test-source --jsonl \
     > "$work/live.stdout" 2> "$work/live.stderr"; then
   printf '%s\n' 'expected capture failure to propagate' >&2
   exit 1
 fi
+grep -Fq 'capture failed with status 19' "$work/live.stderr"
 grep -Fqx -- '--target' "$work/pw.log"
 grep -Fqx 'test-source' "$work/pw.log"
 [[ ! -s $work/live.stdout ]]
+[[ $(sed -n '1p' "$work/order.log") == docker-start ]]
+[[ $(sed -n '2p' "$work/order.log") == docker-ready ]]
+[[ $(sed -n '3p' "$work/order.log") == capture-start ]]
+! kill -0 "$(< "$work/docker.pid")" 2>/dev/null
+
+: > "$work/order.log"
+CASCADE_FAKE_CAPTURE_MODE=bounded \
+  "$repo_root/scripts/cascade" live --source finite-source --jsonl
+[[ $(sed -n '3p' "$work/order.log") == capture-start ]]
+! kill -0 "$(< "$work/docker.pid")" 2>/dev/null
+
+if CASCADE_FAKE_DOCKER_MODE=never-ready \
+    NATIVE_ASR_CASCADE_READY_TIMEOUT_SECONDS=1 \
+    "$repo_root/scripts/cascade" file "$work/audio.wav" --jsonl \
+    > "$work/timeout.stdout" 2> "$work/timeout.stderr"; then
+  printf '%s\n' 'expected readiness timeout' >&2
+  exit 1
+fi
+grep -Fq 'readiness timed out after 1 seconds' "$work/timeout.stderr"
+! kill -0 "$(< "$work/docker.pid")" 2>/dev/null
+
+if CASCADE_FAKE_DOCKER_MODE=exit-before-ready \
+    "$repo_root/scripts/cascade" file "$work/audio.wav" --jsonl \
+    > "$work/early.stdout" 2> "$work/early.stderr"; then
+  printf '%s\n' 'expected early runtime failure' >&2
+  exit 1
+fi
+grep -Fq 'runtime exited before readiness' "$work/early.stderr"
 
 mkdir "$work/existing.audit"
 if "$repo_root/scripts/cascade" file "$work/audio.wav" --audit "$work/existing.audit" \
@@ -66,5 +131,29 @@ if "$repo_root/scripts/cascade" file "$work/audio.wav" --audit "$work/existing.a
   exit 1
 fi
 grep -Fq 'audit destination already exists' "$work/overwrite.stderr"
+
+: > "$work/order.log"
+set +e
+CASCADE_FAKE_CAPTURE_MODE=blocking \
+  "$repo_root/scripts/cascade" live --source blocking-source --jsonl \
+  > "$work/cancel.stdout" 2> "$work/cancel.stderr" &
+wrapper_pid=$!
+for _ in $(seq 1 100); do
+  grep -Fq 'capture-start' "$work/order.log" && break
+  sleep 0.02
+done
+kill -TERM "$wrapper_pid"
+wait "$wrapper_pid"
+cancel_status=$?
+set -e
+[[ $cancel_status == 130 ]]
+grep -Fq 'cascade: cancelled' "$work/cancel.stderr"
+! kill -0 "$(< "$work/docker.pid")" 2>/dev/null
+! kill -0 "$(< "$work/capture.pid")" 2>/dev/null
+
+if find "$work/tmp" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  printf '%s\n' 'cascade runtime directory was not cleaned up' >&2
+  exit 1
+fi
 
 printf '%s\n' 'cascade wrapper smoke: ok'
