@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import wave
+
+
+ROOT = Path(__file__).resolve().parents[1]
+os.environ.setdefault("NATIVE_ASR_REPO_ROOT", str(ROOT))
+os.environ.setdefault("NATIVE_ASR_MODELS", "/tmp/models")
+os.environ.setdefault("NATIVE_ASR_CACHE", "/tmp/cache")
+os.environ.setdefault("NATIVE_ASR_DATASETS", "/tmp/datasets")
+os.environ.setdefault("NATIVE_ASR_BENCHMARKS", "/tmp/benchmarks/runs.jsonl")
+sys.path.insert(0, str(ROOT / "scripts/lib"))
+
+import cascade_benchmark as benchmark  # noqa: E402
+
+
+with tempfile.TemporaryDirectory(prefix="native-asr-cascade-benchmark.") as temporary:
+    root = Path(temporary)
+    benchmark.CACHE = root / "cache"
+    benchmark.DATASETS = root / "datasets"
+    prepared = root / "prepared"
+    prepared.mkdir()
+    rows = []
+    for index, reference in enumerate(("ALPHA WORD", "BETA WORD")):
+        audio = prepared / f"u{index}.wav"
+        with wave.open(str(audio), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(16000)
+            output.writeframes(b"\0\0" * 1600)
+        rows.append({
+            "utterance_id": f"u{index}", "reference": reference,
+            "prepared_path": str(audio), "duration_seconds": 0.1,
+        })
+    manifest = root / "manifest.jsonl"
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    audio, info = benchmark.fixture("librispeech-test-clean", manifest, rows, 1000)
+    assert audio.is_file()
+    assert info["frames"] == 19200
+    assert info["duration_seconds"] == 1.2
+    # A repeated build must reuse the same verified fixture.
+    assert benchmark.fixture("librispeech-test-clean", manifest, rows, 1000)[0] == audio
+
+    events = [
+        {"sequence": 0, "state": "provisional", "segment_id": 0,
+         "monotonic_ms": 110, "latency_ms": 110, "model": "nemo:nemotron-streaming-en"},
+        {"sequence": 1, "state": "model_final", "segment_id": 0,
+         "monotonic_ms": 200, "latency_ms": 0, "model": "nemo:nemotron-streaming-en",
+         "text": "ALFA WORD"},
+        {"sequence": 2, "state": "model_final", "segment_id": 0,
+         "monotonic_ms": 350, "latency_ms": 0, "model": "nemo:parakeet-tdt-v3",
+         "text": "ALPHA WORD"},
+        {"sequence": 3, "state": "committed", "segment_id": 0,
+         "monotonic_ms": 350, "latency_ms": 0, "model": "nemo:parakeet-tdt-v3",
+         "text": "ALPHA WORD", "degraded": False, "degradation_reason": None},
+        {"sequence": 4, "state": "provisional", "segment_id": 1,
+         "monotonic_ms": 500, "latency_ms": 90, "model": "nemo:nemotron-streaming-en"},
+        {"sequence": 5, "state": "model_final", "segment_id": 1,
+         "monotonic_ms": 600, "latency_ms": 0, "model": "nemo:nemotron-streaming-en",
+         "text": "BETA WORD"},
+        {"sequence": 6, "state": "model_final", "segment_id": 1,
+         "monotonic_ms": 800, "latency_ms": 0, "model": "nemo:parakeet-tdt-v3",
+         "text": "BETA WORD"},
+        {"sequence": 7, "state": "committed", "segment_id": 1,
+         "monotonic_ms": 800, "latency_ms": 0, "model": "nemo:parakeet-tdt-v3",
+         "text": "BETA WORD", "degraded": False, "degradation_reason": None},
+    ]
+    thermal = benchmark.ThermalSampler()
+    thermal.peaks = {"fixture": 55.0}
+    summary = benchmark.analyze(
+        events,
+        {"real_time_factor": 1.0, "wall_ms": 1200, "user_seconds": 1.0,
+         "system_seconds": 0.1, "peak_rss_kb": 100, "nemotron_loads": 1,
+         "parakeet_loads": 1},
+        rows, info, True, thermal, 100, 100,
+    )
+    assert summary["contiguous_events"]
+    assert summary["committed_wer"] == 0
+    assert summary["nemotron_wer"] > summary["committed_wer"]
+    assert summary["correction_rate"] == 0.5
+    assert summary["partial_lag_p95_ms"] == 110
+    assert summary["correction_lag_max_ms"] == 200
+    assert summary["acceptance_passed"]
+
+print("cascade benchmark unit: ok")

@@ -64,6 +64,18 @@ transcribe alias audio:
 ensemble audio output:
     @./scripts/ensemble --output {{ quote(output) }} {{ quote(audio) }}
 
+# Start the interactive Nemotron-to-Parakeet cascade from the default PipeWire source.
+cascade-live:
+    @./scripts/cascade live
+
+# Replay a file at real-time pace through the interactive cascade.
+cascade-file audio:
+    @./scripts/cascade file {{ quote(audio) }}
+
+# Evaluate one deterministic 100-utterance public-corpus cascade replay.
+cascade-benchmark dataset:
+    @./scripts/cascade-benchmark {{ quote(dataset) }}
+
 # Benchmark one model/audio pair and append a provenance-rich JSONL record.
 bench alias audio:
     @./scripts/benchmark {{ quote(alias) }} {{ quote(audio) }}

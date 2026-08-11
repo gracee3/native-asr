@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=scripts/lib/paths.sh
+source "$repo_root/scripts/lib/paths.sh"
+
+docker_bin=${DOCKER_BIN:-docker}
+ffmpeg_bin=${FFMPEG_BIN:-ffmpeg}
+pw_record_bin=${PW_RECORD_BIN:-pw-record}
+verify_models_bin=${NATIVE_ASR_VERIFY_MODELS_BIN:-$repo_root/scripts/verify-models}
+image=${NATIVE_ASR_NEMO_IMAGE:-asr-nemo-speech}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 2
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/cascade live [--source PIPEWIRE_NODE] [OPTIONS]
+  scripts/cascade file AUDIO [--paced|--unpaced] [OPTIONS]
+
+Options:
+  --jsonl                 emit canonical JSONL instead of the terminal viewer
+  --audit DIR             atomically publish a private audit bundle
+  --endpoint-ms N         token-silence endpoint threshold (default: 800)
+  --deadline-ms N         Parakeet correction deadline (default: 2500)
+  --right-context N       RNNT encoder frames (default: 1, about 160 ms)
+  --source NODE           selected PipeWire source (live mode only)
+  --paced                 replay file at real-time pace (file default)
+  --unpaced               decode file without replay pacing
+
+Audio is normalized on the host to raw 16 kHz mono float PCM and streamed over
+stdin. The container receives no audio device and neither mode saves raw audio.
+EOF
+}
+
+(($# >= 1)) || {
+  usage >&2
+  exit 2
+}
+mode=$1
+shift
+[[ $mode == live || $mode == file ]] || die "mode must be live or file"
+
+audio=''
+if [[ $mode == file ]]; then
+  (($# >= 1)) || die 'file mode requires an audio path'
+  audio=$1
+  shift
+fi
+
+source_node=''
+audit=''
+paced=true
+cascade_args=()
+while (($#)); do
+  case $1 in
+    --jsonl)
+      cascade_args+=(--jsonl)
+      shift
+      ;;
+    --audit|--endpoint-ms|--deadline-ms|--right-context)
+      (($# >= 2)) || die "$1 requires a value"
+      if [[ $1 == --audit ]]; then
+        audit=$2
+      else
+        cascade_args+=("$1" "$2")
+      fi
+      shift 2
+      ;;
+    --source)
+      (($# >= 2)) || die '--source requires a PipeWire node'
+      [[ $mode == live ]] || die '--source is valid only in live mode'
+      source_node=$2
+      shift 2
+      ;;
+    --paced)
+      [[ $mode == file ]] || die '--paced is valid only in file mode'
+      paced=true
+      shift
+      ;;
+    --unpaced)
+      [[ $mode == file ]] || die '--unpaced is valid only in file mode'
+      paced=false
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+if [[ $mode == file ]]; then
+  [[ -r $audio ]] || die "audio input is not readable: $audio"
+  audio=$(realpath -e -- "$audio")
+  [[ $paced == false ]] || cascade_args+=(--pace)
+fi
+
+"$verify_models_bin" nemo:nemotron-streaming-en >/dev/null
+"$verify_models_bin" nemo:parakeet-tdt-v3 >/dev/null
+
+model_tree=$NATIVE_ASR_MODELS/nemo-speech
+[[ -d $model_tree ]] || die "NeMo model tree is missing: $model_tree"
+
+docker_args=(
+  run --rm -i --network none
+  --read-only
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777
+  --mount "type=bind,src=$model_tree,dst=/models,readonly"
+)
+if [[ $(id -u) != 0 ]]; then
+  docker_args+=(--user "$(id -u):$(id -g)")
+fi
+
+if [[ -n $audit ]]; then
+  audit=$(realpath -m -- "$audit")
+  [[ ! -e $audit && ! -L $audit ]] || die "audit destination already exists: $audit"
+  audit_parent=$(dirname -- "$audit")
+  audit_name=$(basename -- "$audit")
+  [[ $audit_name != . && $audit_name != .. ]] || die 'invalid audit destination'
+  [[ -d $audit_parent && -w $audit_parent ]] || \
+    die "audit parent must be an existing writable directory: $audit_parent"
+  audit_parent=$(realpath -e -- "$audit_parent")
+  docker_args+=(--mount "type=bind,src=$audit_parent,dst=/audit")
+  cascade_args+=(--audit "/audit/$audit_name")
+fi
+
+docker_args+=("$image" cascade "${cascade_args[@]}")
+
+if [[ $mode == live ]]; then
+  command -v "$pw_record_bin" >/dev/null || die "PipeWire recorder not found: $pw_record_bin"
+  capture_args=(--rate 16000 --channels 1 --channel-map mono --format f32 --latency 160ms)
+  [[ -z $source_node ]] || capture_args+=(--target "$source_node")
+  "$pw_record_bin" "${capture_args[@]}" - |
+    "$docker_bin" "${docker_args[@]}"
+  exit
+fi
+
+command -v "$ffmpeg_bin" >/dev/null || die "FFmpeg not found: $ffmpeg_bin"
+ffmpeg_args=(-nostdin -hide_banner -loglevel error)
+ffmpeg_args+=(
+  -i "$audio" -map_metadata -1 -vn -sn -dn
+  -ar 16000 -ac 1 -c:a pcm_f32le -f f32le pipe:1
+)
+# The supervisor owns pacing so its clock starts only after both models are
+# resident; FFmpeg cannot silently catch up while the container is loading.
+"$ffmpeg_bin" "${ffmpeg_args[@]}" |
+  "$docker_bin" "${docker_args[@]}"

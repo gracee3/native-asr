@@ -33,6 +33,9 @@ RUN git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/NeMo-Sp
     && test "$(git -C ggml rev-parse HEAD)" = "${GGML_REVISION}"
 
 WORKDIR /src/nemo-speech
+COPY docker/nemo-speech/cascade-protocol.h /src/native-asr-cascade/cascade-protocol.h
+COPY docker/nemo-speech/native-asr-nemo-worker.cpp /src/native-asr-cascade/native-asr-nemo-worker.cpp
+COPY docker/nemo-speech/native-asr-cascade.cpp /src/native-asr-cascade/native-asr-cascade.cpp
 RUN cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_AVX=ON \
@@ -61,10 +64,19 @@ RUN cmake -S . -B build -G Ninja \
         -DNEMO_SPEECH_WITH_GRPC=OFF \
         -DNEMO_SPEECH_WITH_NMT=OFF \
         -DNEMO_SPEECH_WITH_NORM=OFF \
-    && cmake --build build --parallel --target nemo_speech_cli \
+    && cmake --build build --parallel --target nemo_speech_cli nemo_speech_asr_c \
     && install -d /opt/native-asr/bin /opt/native-asr/lib \
         /opt/native-asr/share/licenses/nemo-speech/ggml \
     && install -m 0755 build/bin/nemo-speech /opt/native-asr/bin/ \
+    && c++ -std=c++17 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+        -I include -I /src/native-asr-cascade \
+        /src/native-asr-cascade/native-asr-nemo-worker.cpp \
+        -L build/bin -Wl,-rpath,'$ORIGIN/../lib' -lnemo_speech_asr_c \
+        -o /opt/native-asr/bin/native-asr-nemo-worker \
+    && c++ -std=c++17 -O3 -DNDEBUG -Wall -Wextra -Wpedantic \
+        -I /src/native-asr-cascade \
+        /src/native-asr-cascade/native-asr-cascade.cpp \
+        -o /opt/native-asr/bin/native-asr-cascade \
     && for library in build/bin/libggml*.so* build/bin/libnemo_speech*.so*; \
       do test -e "$library" && cp -a "$library" /opt/native-asr/lib/; done \
     && install -m 0644 LICENSE NOTICE THIRD_PARTY_NOTICES.md \
@@ -72,11 +84,15 @@ RUN cmake -S . -B build -G Ninja \
     && install -m 0644 ggml/LICENSE \
         /opt/native-asr/share/licenses/nemo-speech/ggml/ \
     && patchelf --set-rpath '$ORIGIN/../lib' /opt/native-asr/bin/nemo-speech \
+    && patchelf --set-rpath '$ORIGIN/../lib' /opt/native-asr/bin/native-asr-nemo-worker \
     && find /opt/native-asr/lib -type f -name '*.so*' -exec \
         patchelf --set-rpath '$ORIGIN' {} \; \
     && test "$(patchelf --print-rpath /opt/native-asr/bin/nemo-speech)" = '$ORIGIN/../lib' \
+    && test "$(patchelf --print-rpath /opt/native-asr/bin/native-asr-nemo-worker)" = '$ORIGIN/../lib' \
     && ldd /opt/native-asr/bin/nemo-speech \
-    && ! ldd /opt/native-asr/bin/nemo-speech | grep -F 'not found'
+    && ! ldd /opt/native-asr/bin/nemo-speech | grep -F 'not found' \
+    && ldd /opt/native-asr/bin/native-asr-nemo-worker \
+    && ! ldd /opt/native-asr/bin/native-asr-nemo-worker | grep -F 'not found'
 
 FROM ${BASE_IMAGE} AS runtime
 

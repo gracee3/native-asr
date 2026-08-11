@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=scripts/lib/paths.sh
+source "$repo_root/scripts/lib/paths.sh"
+exec python3 "$repo_root/scripts/lib/cascade_benchmark.py" "$@"

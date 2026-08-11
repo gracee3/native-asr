@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-cascade-wrapper.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+mkdir -p "$work/bin" "$work/models/nemo-speech"
+: > "$work/audio.wav"
+
+cat > "$work/bin/verify" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$CASCADE_VERIFY_LOG"
+EOF
+cat > "$work/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CASCADE_DOCKER_LOG"
+cat >/dev/null
+EOF
+cat > "$work/bin/ffmpeg" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CASCADE_FFMPEG_LOG"
+dd if=/dev/zero bs=10240 count=1 status=none
+EOF
+cat > "$work/bin/pw-record" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CASCADE_PW_LOG"
+exit 19
+EOF
+chmod +x "$work/bin/verify" "$work/bin/docker" "$work/bin/ffmpeg" "$work/bin/pw-record"
+
+export NATIVE_ASR_MODELS=$work/models
+export NATIVE_ASR_VERIFY_MODELS_BIN=$work/bin/verify
+export DOCKER_BIN=$work/bin/docker
+export FFMPEG_BIN=$work/bin/ffmpeg
+export PW_RECORD_BIN=$work/bin/pw-record
+export CASCADE_VERIFY_LOG=$work/verify.log
+export CASCADE_DOCKER_LOG=$work/docker.log
+export CASCADE_FFMPEG_LOG=$work/ffmpeg.log
+export CASCADE_PW_LOG=$work/pw.log
+
+"$repo_root/scripts/cascade" file "$work/audio.wav" --jsonl --audit "$work/file.audit"
+grep -Fqx 'nemo:nemotron-streaming-en' "$work/verify.log"
+grep -Fqx 'nemo:parakeet-tdt-v3' "$work/verify.log"
+grep -Fqx -- '--network' "$work/docker.log"
+grep -Fqx 'none' "$work/docker.log"
+grep -Fqx -- '--read-only' "$work/docker.log"
+grep -Fqx "type=bind,src=$work/models/nemo-speech,dst=/models,readonly" "$work/docker.log"
+! grep -Fqx -- '-re' "$work/ffmpeg.log"
+grep -Fqx -- '--pace' "$work/docker.log"
+grep -Fqx '/audit/file.audit' "$work/docker.log"
+
+: > "$work/verify.log"
+if "$repo_root/scripts/cascade" live --source test-source --jsonl \
+    > "$work/live.stdout" 2> "$work/live.stderr"; then
+  printf '%s\n' 'expected capture failure to propagate' >&2
+  exit 1
+fi
+grep -Fqx -- '--target' "$work/pw.log"
+grep -Fqx 'test-source' "$work/pw.log"
+[[ ! -s $work/live.stdout ]]
+
+mkdir "$work/existing.audit"
+if "$repo_root/scripts/cascade" file "$work/audio.wav" --audit "$work/existing.audit" \
+    > "$work/overwrite.stdout" 2> "$work/overwrite.stderr"; then
+  printf '%s\n' 'expected wrapper no-overwrite check to fail' >&2
+  exit 1
+fi
+grep -Fq 'audit destination already exists' "$work/overwrite.stderr"
+
+printf '%s\n' 'cascade wrapper smoke: ok'

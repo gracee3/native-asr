@@ -44,6 +44,9 @@ python3 -m py_compile scripts/lib/*.py
 ./tests/sherpa-entrypoint-smoke
 ./tests/nemo-entrypoint-smoke
 ./tests/transcribe-smoke
+./tests/cascade-smoke
+./tests/cascade-wrapper-smoke
+./tests/cascade-benchmark-unit
 ./tests/ensemble-unit
 ./tests/ensemble-smoke
 ./tests/ensemble-regression

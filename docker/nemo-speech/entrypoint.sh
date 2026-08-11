@@ -2,6 +2,7 @@
 set -euo pipefail
 
 nemo_bin=${NEMO_SPEECH_BIN:-/opt/native-asr/bin/nemo-speech}
+cascade_bin=${NATIVE_ASR_CASCADE_BIN:-/opt/native-asr/bin/native-asr-cascade}
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -12,6 +13,7 @@ usage() {
   cat <<'EOF'
 Usage:
   native-asr-nemo transcribe --model MODEL_GGUF [OPTIONS] AUDIO
+  native-asr-nemo cascade [OPTIONS] < 16k-mono-f32le.pcm
   native-asr-nemo version
 
 Options:
@@ -22,6 +24,7 @@ Options:
 
 MODEL_GGUF must be below the read-only /models mount in normal container use.
 Input audio is normalized to a temporary 16 kHz mono PCM16 WAV.
+The cascade consumes raw 16 kHz mono float32 PCM on stdin and never saves it.
 EOF
 }
 
@@ -178,6 +181,7 @@ else
 fi
 case $command in
   transcribe) transcribe "$@" ;;
+  cascade) exec "$cascade_bin" "$@" ;;
   version|versions|--version) version ;;
   help|--help|-h) usage ;;
   *) die "unknown command: $command" ;;

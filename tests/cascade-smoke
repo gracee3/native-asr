@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-cascade-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+
+g++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread \
+  -I "$repo_root/docker/nemo-speech" \
+  "$repo_root/docker/nemo-speech/native-asr-cascade.cpp" \
+  -o "$work/cascade"
+g++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread \
+  -I "$repo_root/docker/nemo-speech" \
+  "$repo_root/tests/fixtures/cascade-fake-worker.cpp" \
+  -o "$work/worker"
+
+# Six 160 ms chunks of raw mono float32 silence. The fake worker endpoints every
+# two chunks, so prefixes select deterministic one-, two-, and three-segment cases.
+dd if=/dev/zero of="$work/audio.f32" bs=10240 count=6 status=none
+
+run_cascade() {
+  local output=$1 chunks=$2
+  shift 2
+  head -c "$((chunks * 10240))" "$work/audio.f32" |
+    env "$@" "$work/cascade" --jsonl --worker "$work/worker" \
+      --nemotron fake-nemotron --parakeet fake-parakeet
+}
+
+run_cascade "$work/success.jsonl" 4 > "$work/success.jsonl"
+jq -s -e '
+  ([.[].sequence] == [range(0; length)])
+  and ([.[] | select(.state == "committed") | .segment_id] == [0, 1])
+  and ([.[] | select(.state == "committed") | .model]
+       == ["nemo:parakeet-tdt-v3", "nemo:parakeet-tdt-v3"])
+  and (all(.[]; (.session_id | length) > 0 and .track_id == "interactive"))
+  and (all(.[]; .latency_ms >= 0 and .audio_end_ms >= .audio_start_ms))
+  and (all(.[] | select(.state == "committed"); .degraded == false))
+' "$work/success.jsonl" >/dev/null
+jq -s -e '
+  [group_by(.segment_id)[] |
+    ([.[] | select(.state == "model_final") | .model]
+     == ["nemo:nemotron-streaming-en", "nemo:parakeet-tdt-v3"])] | all
+' "$work/success.jsonl" >/dev/null
+
+# End-of-input must flush a nonempty region that has not reached the fake
+# endpoint interval.
+run_cascade "$work/flush.jsonl" 3 > "$work/flush.jsonl"
+jq -s -e '[.[] | select(.state == "committed") | .segment_id] == [0, 1]' \
+  "$work/flush.jsonl" >/dev/null
+
+head -c 10240 "$work/audio.f32" |
+  "$work/cascade" --jsonl --pace --worker "$work/worker" \
+    --nemotron fake --parakeet fake > "$work/paced.jsonl"
+jq -s -e '
+  (.[0].monotonic_ms >= 120)
+  and (all(.[]; .latency_ms >= 0))
+  and ([.[] | select(.state == "committed")][0].segment_id == 0)
+' "$work/paced.jsonl" >/dev/null
+
+CASCADE_FAKE_SCENARIO=failure \
+  run_cascade "$work/failure.jsonl" 2 > "$work/failure.jsonl"
+jq -s -e '
+  [.[] | select(.state == "committed")][0]
+  | .degraded == true and .degradation_reason == "worker_failure"
+    and .model == "nemo:nemotron-streaming-en"
+' "$work/failure.jsonl" >/dev/null
+
+CASCADE_FAKE_SCENARIO=empty \
+  run_cascade "$work/empty.jsonl" 2 > "$work/empty.jsonl"
+jq -s -e '
+  [.[] | select(.state == "committed")][0]
+  | .degraded == true and .degradation_reason == "empty_output"
+' "$work/empty.jsonl" >/dev/null
+
+head -c 20480 "$work/audio.f32" |
+  env CASCADE_FAKE_DELAY_MS=120 \
+  "$work/cascade" --jsonl --deadline-ms 40 --worker "$work/worker" \
+    --nemotron fake --parakeet fake > "$work/timeout.jsonl"
+jq -s -e '
+  [.[] | select(.state == "committed")][0]
+  | .degraded == true and .degradation_reason == "timeout"
+' "$work/timeout.jsonl" >/dev/null
+# A correction arriving after its deadline can never appear as a replacement.
+! jq -e 'select(.model == "nemo:parakeet-tdt-v3")' "$work/timeout.jsonl" >/dev/null
+
+head -c 61440 "$work/audio.f32" |
+  env CASCADE_FAKE_DELAY_MS=250 \
+  "$work/cascade" --jsonl --deadline-ms 1000 --worker "$work/worker" \
+    --nemotron fake --parakeet fake > "$work/overload.jsonl"
+jq -s -e '
+  ([.[] | select(.state == "committed") | .segment_id] == [0, 1, 2])
+  and ([.[] | select(.state == "committed" and .segment_id == 2)][0]
+       | .degraded == true and .degradation_reason == "queue_overload")
+' "$work/overload.jsonl" >/dev/null
+
+audit=$work/session.audit
+head -c 20480 "$work/audio.f32" |
+  "$work/cascade" --jsonl --worker "$work/worker" --nemotron fake --parakeet fake \
+    --audit "$audit" > "$work/audit.stdout"
+[[ $(stat -c '%a' "$audit") == 700 ]]
+[[ $(stat -c '%a' "$audit/events.jsonl") == 600 ]]
+[[ $(stat -c '%a' "$audit/result.json") == 600 ]]
+[[ $(stat -c '%a' "$audit/transcript.txt") == 600 ]]
+cmp "$work/audit.stdout" "$audit/events.jsonl"
+jq -e '
+  .status == "complete" and .segments == 1 and .degraded_segments == 0
+  and .nemotron_loads == 1 and .parakeet_loads == 1
+' "$audit/result.json" >/dev/null
+grep -Fqx 'parakeet segment 1' "$audit/transcript.txt"
+
+if head -c 20480 "$work/audio.f32" |
+    "$work/cascade" --jsonl --worker "$work/worker" --nemotron fake --parakeet fake \
+      --audit "$audit" > "$work/overwrite.stdout" 2> "$work/overwrite.stderr"; then
+  printf '%s\n' 'expected audit no-overwrite check to fail' >&2
+  exit 1
+fi
+grep -Fq 'audit destination already exists' "$work/overwrite.stderr"
+
+cancel_audit=$work/cancelled.audit
+set +e
+sleep 5 | "$work/cascade" --jsonl --worker "$work/worker" --nemotron fake --parakeet fake \
+  --audit "$cancel_audit" > "$work/cancel.stdout" 2> "$work/cancel.stderr" &
+cancel_pid=$!
+sleep 0.2
+kill -INT "$cancel_pid"
+wait "$cancel_pid"
+cancel_status=$?
+set -e
+[[ $cancel_status == 130 ]]
+[[ ! -e $cancel_audit ]]
+grep -Fq 'cascade: cancelled' "$work/cancel.stderr"
+
+printf '%s\n' 'cascade integration smoke: ok'

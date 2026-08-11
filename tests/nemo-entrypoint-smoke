@@ -21,6 +21,7 @@ ctc=$work/parakeet-ctc-1.1b.q8_0.gguf
 
 export PATH="$fixture_bin:$PATH"
 export NEMO_SPEECH_BIN=$fixture_bin/nemo-speech
+export NATIVE_ASR_CASCADE_BIN=$fixture_bin/native-asr-cascade
 
 offline_json=$(
   "$entrypoint" transcribe --model "$tdt" --format json "$audio"
@@ -79,5 +80,8 @@ version_output=$(
 )
 grep -Fqx 'native_asr_runtime_version=1.0.0' <<< "$version_output"
 grep -Fqx 'ggml_revision=test-ggml' <<< "$version_output"
+
+cascade_output=$("$entrypoint" cascade --jsonl --endpoint-ms 800)
+grep -Fqx 'cascade fixture: <--jsonl> <--endpoint-ms> <800>' <<< "$cascade_output"
 
 printf '%s\n' 'nemo entrypoint smoke: ok'
