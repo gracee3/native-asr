@@ -1,4 +1,16 @@
-# Reproducibility report: 2026-08-09
+# Reproducibility report
+
+## Host scope
+
+All results dated 2026-08-09 below are preserved historical i7-1185G7
+snapshots. They remain useful for their recorded benchmark fingerprints but are
+not evidence for the current interactive milestone. Beginning 2026-08-10, the
+ThinkPad T14 i5-1145G7 with 15 GiB RAM is the sole development and acceptance
+host for the Nemotron-to-Parakeet cascade. Reviewed T14 cascade aggregates will
+be appended in a separate section after its gates pass; raw event logs remain
+outside Git.
+
+## 2026-08-09 validated i7 state
 
 ## Validated state
 

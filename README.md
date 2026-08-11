@@ -19,6 +19,13 @@ Four pinned native CPU runtimes, nine ASR aliases, locked public evaluation
 corpora, stateful streaming adapters, and reproducible WER/performance suites
 share one model-free, network-disabled container interface.
 
+The current development direction is an English CPU-only interactive cascade on
+the ThinkPad T14 (i5-1145G7, 15 GiB): NeMo Nemotron provides provisional phrase
+text and NeMo Parakeet TDT v3 authoritatively re-decodes each endpointed phrase.
+The design and acceptance contract are recorded in
+[`docs/interactive-cascade.md`](docs/interactive-cascade.md); implementation and
+T14 gates remain pending until that document is updated with verified results.
+
 The deterministic 100-utterance gate is complete for all nine aliases on both
 LibriSpeech splits: 18/18 runs completed with zero failures. A lower-commitment
 full-corpus checkpoint is also complete for Sherpa Parakeet and NeMo Parakeet
@@ -28,8 +35,9 @@ remain pending.
 
 ## Validated benchmark snapshot
 
-These are the SHA-256-ranked 100-utterance gate results from 2026-08-09, not a
-claimed full-split ranking. Every cell used the same clean Git revision
+These are historical i7 SHA-256-ranked 100-utterance gate results from
+2026-08-09, not a claimed full-split ranking or current T14 acceptance evidence.
+Every cell used the same clean Git revision
 `797eb65`, locked artifacts, `english-upper-apostrophe-v1` WER normalization,
 and CPU-only containers on an Intel Core i7-1185G7 (4 cores / 8 threads,
 31.1 GiB RAM).
@@ -313,8 +321,8 @@ just versions
 | `sherpa:parakeet-unified-en` | primary English long-form model | INT8 ONNX, offline with VAD |
 | `sherpa:canary-180m-flash` | small multilingual challenger | INT8 ONNX, offline |
 | `sherpa:nemotron-streaming-en` | streaming and cross-runtime comparison | 560 ms INT8 ONNX |
-| `nemo:parakeet-tdt-v3` | primary NeMo-Speech.cpp long-form model | Q8 GGUF, offline |
-| `nemo:nemotron-streaming-en` | streaming and cross-runtime comparison | Q8 GGUF |
+| `nemo:parakeet-tdt-v3` | authoritative interactive correction and NeMo long-form model | Q8 GGUF, offline |
+| `nemo:nemotron-streaming-en` | English interactive first pass and cross-runtime comparison | Q8 GGUF |
 | `nemo:nemotron-3.5-streaming` | multilingual streaming phase two | Q8 GGUF |
 | `nemo:parakeet-ctc-1.1b` | experimental batch-throughput model | Q8 GGUF |
 | `moonshine:small-streaming-en` | low-latency stateful English model | quantized multi-file ORT tree |
@@ -329,6 +337,7 @@ packaging rule is recorded in [`manifests/models.lock`](manifests/models.lock).
 - [`docs/models.md`](docs/models.md) — lockfile and on-disk model contract
 - [`docs/benchmarking.md`](docs/benchmarking.md) — benchmark and accuracy metadata contract
 - [`docs/ensemble.md`](docs/ensemble.md) — deterministic consensus command and audit contract
+- [`docs/interactive-cascade.md`](docs/interactive-cascade.md) — authoritative T14 interactive design and acceptance gates
 - [`docs/reproducibility-report.md`](docs/reproducibility-report.md) — validated images, run IDs, and current limitations
 - [`docs/future-ensemble-reconstruction.md`](docs/future-ensemble-reconstruction.md) — deferred LLM, concurrency, and streaming direction
 - [`docs/future-rust-tui.md`](docs/future-rust-tui.md) — deferred terminal UI and event-protocol direction

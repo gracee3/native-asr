@@ -65,10 +65,17 @@ portable behavior and benchmark comparability are established.
 
 ## Batch and streaming
 
-Recorded, long-form transcription is the primary product path. Offline models
-use upstream-supported VAD or explicit chunking rather than a silent monolithic
-request. Streaming-capable models retain a stateful file-decoding path before
-microphone plumbing is added.
+Recorded, long-form transcription remains supported. Offline models use
+upstream-supported VAD or explicit chunking rather than a silent monolithic
+request. The current interactive product path is the T14-local English
+Nemotron-to-Parakeet cascade specified in `docs/interactive-cascade.md`.
+
+The cascade adds a native supervisor and stable-C-ABI worker to the existing
+NeMo image. Host PipeWire capture or file decoding writes 16 kHz mono float PCM
+to container stdin; no sound device enters the container. Nemotron stays
+resident and produces provisional text and endpoints while a separate,
+restartable resident Parakeet worker corrects finalized phrases. The recorded-
+audio ensemble remains independent of this path.
 
 Benchmark records must distinguish raw runtime behavior from production
 long-form segmentation. Results using different segmentation strategies are not

@@ -1,4 +1,12 @@
-# Benchmark run handoff
+# Historical i7 benchmark campaign
+
+> Historical status (2026-08-10): this handoff is preserved as the operational
+> record for the i7-1185G7 campaign. It is no longer the active development or
+> acceptance plan. Published results remain labeled i7 snapshots. The ThinkPad
+> T14 i5-1145G7 with 15 GiB RAM is the sole current development and validation
+> host; its interactive cascade contract is in
+> `docs/interactive-cascade.md`. Do not resume this campaign as part of cascade
+> acceptance.
 
 This is the operational handoff for the agent running the completed native-ASR
 suite on the larger i7 machine. The objective is to produce the real
