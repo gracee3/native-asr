@@ -88,6 +88,10 @@ cascade-file audio:
 cascade-benchmark dataset:
     @./scripts/cascade-benchmark {{ quote(dataset) }}
 
+# Exercise the exact live-capture path through an isolated PipeWire graph.
+cascade-loopback dataset:
+    @./scripts/cascade-benchmark --transport pipewire-loopback {{ quote(dataset) }}
+
 # Benchmark one model/audio pair and append a provenance-rich JSONL record.
 bench alias audio:
     @./scripts/benchmark {{ quote(alias) }} {{ quote(audio) }}

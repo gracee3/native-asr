@@ -127,6 +127,7 @@ scripts/cascade live [--source PIPEWIRE_NODE] [OPTIONS]
 scripts/cascade file AUDIO [OPTIONS]
 just cascade-live
 just cascade-file AUDIO
+just cascade-loopback librispeech-test-clean
 ```
 
 Ordinary repository checks never invoke live capture. Automated release
@@ -142,6 +143,13 @@ with endpointed interactive phrases while retaining 31 `test-clean` speakers
 and 28 `test-other` speakers. `--selection hash` retains the broader
 SHA-256-ranked stress sample; it is deliberately not interchangeable with the
 accepted phrase fixture.
+
+`scripts/cascade-benchmark --transport pipewire-loopback DATASET` is the release
+transport. It creates autoconnect-disabled mono virtual nodes, records their
+exact graph identities, rejects a link to any physical/unknown endpoint, and
+always addresses the virtual source and sink by their unique names. Capture is
+bounded to the fixture plus a teardown margin and never writes PCM. Ordinary
+file replay remains the default and does not claim loopback acceptance.
 
 ## Acceptance gates
 

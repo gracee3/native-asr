@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace protocol = native_asr::cascade_protocol;
@@ -240,14 +241,25 @@ int offline_worker(const char* model) {
         }
         if (text.empty()) {
             // The pinned TDT head can return an empty 1-best for a valid short
-            // phrase at particular terminal shapes. One bounded native retry
-            // changes only encoder flush geometry and does not add speech.
-            std::vector<float> padded(10240, 0.0F);  // 640 ms leading silence
-            padded.insert(padded.end(), samples.begin(), samples.end());
-            padded.resize(padded.size() + 20480, 0.0F);  // 1280 ms trailing silence
-            if (!recognize(padded, &text)) {
-                protocol::write_packet(STDOUT_FILENO, protocol::Message::error, id, 0, error);
-                return 3;
+            // phrase at particular terminal shapes. Bounded native retries
+            // change only encoder flush geometry and do not add speech. The
+            // full-context shape covers a reproducible 400 ms endpoint where
+            // the shorter retry can also return empty.
+            constexpr std::pair<std::size_t, std::size_t> padding[] = {
+                {10240, 20480},  // 640 ms leading, 1280 ms trailing
+                {30720, 30720},  // 1920 ms leading and trailing
+            };
+            for (const auto& [leading, trailing] : padding) {
+                std::vector<float> padded(leading, 0.0F);
+                padded.insert(padded.end(), samples.begin(), samples.end());
+                padded.resize(padded.size() + trailing, 0.0F);
+                if (!recognize(padded, &text)) {
+                    protocol::write_packet(
+                        STDOUT_FILENO, protocol::Message::error, id, 0, error);
+                    return 3;
+                }
+                if (!text.empty())
+                    break;
             }
         }
         if (!protocol::write_packet(STDOUT_FILENO, protocol::Message::result, id, 0, text))

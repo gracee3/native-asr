@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts/lib"))
+
+from pipewire_loopback import (  # noqa: E402
+    PipeWireError,
+    PipeWireLoopback,
+    inspect_graph,
+    node_names,
+)
+
+
+def executable(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+with tempfile.TemporaryDirectory(prefix="native-asr-pipewire-loopback.") as temporary:
+    root = Path(temporary)
+    loopback_bin = root / "pw-loopback"
+    dump_bin = root / "pw-dump"
+    play_bin = root / "pw-play"
+    executable(loopback_bin, """#!/usr/bin/env bash
+if [[ ${1:-} == --version ]]; then
+  printf '%s\\n' 'pw-loopback fake-1.0'
+  exit 0
+fi
+printf '%s\\n' "$@" > "$PW_FAKE_LOOPBACK_LOG"
+printf '%s\\n' "$$" > "$PW_FAKE_PID_FILE"
+exec sleep 30
+""")
+    executable(play_bin, """#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$PW_FAKE_PLAY_LOG"
+if [[ ${PW_FAKE_PLAY_FAIL:-0} == 1 ]]; then
+  exit 17
+fi
+exit 0
+""")
+    executable(dump_bin, """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+
+running = False
+pid_file = Path(os.environ["PW_FAKE_PID_FILE"])
+if pid_file.exists():
+    try:
+        os.kill(int(pid_file.read_text().strip()), 0)
+        running = True
+    except (OSError, ValueError):
+        pass
+
+items = []
+if running:
+    common = {"node.autoconnect": False}
+    items.append({
+        "id": 100, "type": "PipeWire:Interface:Node",
+        "info": {"props": {**common, "node.name": os.environ["PW_FAKE_SINK"],
+                            "media.class": "Audio/Sink", "object.serial": 500}},
+    })
+    if os.environ.get("PW_FAKE_SCENARIO") != "missing-source":
+        items.append({
+            "id": 101, "type": "PipeWire:Interface:Node",
+            "info": {"props": {**common, "node.name": os.environ["PW_FAKE_SOURCE"],
+                                "media.class": "Audio/Source", "object.serial": 501}},
+        })
+    if os.environ.get("PW_FAKE_SCENARIO") == "physical-link":
+        items.extend([
+            {"id": 200, "type": "PipeWire:Interface:Node",
+             "info": {"props": {"node.name": "alsa_output.physical",
+                                 "media.class": "Audio/Sink", "device.id": 9}}},
+            {"id": 300, "type": "PipeWire:Interface:Link",
+             "info": {"output-node-id": 101, "input-node-id": 200, "state": "active"}},
+        ])
+print(json.dumps(items))
+""")
+
+    os.environ.update({
+        "PW_FAKE_PID_FILE": str(root / "loopback.pid"),
+        "PW_FAKE_LOOPBACK_LOG": str(root / "loopback.log"),
+        "PW_FAKE_PLAY_LOG": str(root / "play.log"),
+    })
+
+    assert node_names()[0] != node_names()[0]
+
+    loopback = PipeWireLoopback(
+        run_id="success", pw_loopback_bin=str(loopback_bin),
+        pw_play_bin=str(play_bin), pw_dump_bin=str(dump_bin), node_timeout=0.4,
+    )
+    os.environ["PW_FAKE_SINK"] = loopback.sink_name
+    os.environ["PW_FAKE_SOURCE"] = loopback.source_name
+    os.environ["PW_FAKE_SCENARIO"] = "success"
+    identities = loopback.start()
+    assert identities["sink"]["name"] == loopback.sink_name
+    assert identities["source"]["name"] == loopback.source_name
+    loopback_args = (root / "loopback.log").read_text(encoding="utf-8").splitlines()
+    assert "-c" in loopback_args and "1" in loopback_args
+    assert any(loopback.sink_name in arg for arg in loopback_args)
+    assert any(loopback.source_name in arg for arg in loopback_args)
+    loopback.start_playback(root / "fixture.wav")
+    loopback.wait_playback(1)
+    play_args = (root / "play.log").read_text(encoding="utf-8").splitlines()
+    assert play_args[:2] == ["--target", loopback.sink_name]
+    assert "auto" not in play_args
+    cleanup = loopback.close()
+    assert cleanup["status"] == "complete"
+    assert cleanup["virtual_nodes_absent"]
+
+    missing = PipeWireLoopback(
+        run_id="missing", pw_loopback_bin=str(loopback_bin),
+        pw_play_bin=str(play_bin), pw_dump_bin=str(dump_bin), node_timeout=0.2,
+    )
+    os.environ["PW_FAKE_SINK"] = missing.sink_name
+    os.environ["PW_FAKE_SOURCE"] = missing.source_name
+    os.environ["PW_FAKE_SCENARIO"] = "missing-source"
+    try:
+        missing.start()
+        raise AssertionError("missing virtual source was accepted")
+    except PipeWireError as error:
+        assert "did not appear" in str(error)
+    assert missing.close()["virtual_nodes_absent"]
+
+    physical = PipeWireLoopback(
+        run_id="physical", pw_loopback_bin=str(loopback_bin),
+        pw_play_bin=str(play_bin), pw_dump_bin=str(dump_bin), node_timeout=0.2,
+    )
+    os.environ["PW_FAKE_SINK"] = physical.sink_name
+    os.environ["PW_FAKE_SOURCE"] = physical.source_name
+    os.environ["PW_FAKE_SCENARIO"] = "physical-link"
+    try:
+        physical.start()
+        raise AssertionError("physical-device link was accepted")
+    except PipeWireError:
+        pass
+    assert physical.close()["status"] == "complete"
+
+    os.environ["PW_FAKE_SCENARIO"] = "success"
+    failed_playback = PipeWireLoopback(
+        run_id="failed_playback", pw_loopback_bin=str(loopback_bin),
+        pw_play_bin=str(play_bin), pw_dump_bin=str(dump_bin), node_timeout=0.4,
+    )
+    os.environ["PW_FAKE_SINK"] = failed_playback.sink_name
+    os.environ["PW_FAKE_SOURCE"] = failed_playback.source_name
+    failed_playback.start()
+    os.environ["PW_FAKE_PLAY_FAIL"] = "1"
+    failed_playback.start_playback(root / "fixture.wav")
+    try:
+        failed_playback.wait_playback(1)
+        raise AssertionError("failed playback was accepted")
+    except PipeWireError:
+        pass
+    finally:
+        os.environ.pop("PW_FAKE_PLAY_FAIL")
+    assert failed_playback.close()["status"] == "complete"
+
+    active_graph = [
+        {"id": 1, "type": "PipeWire:Interface:Node", "info": {"props": {
+            "node.name": "sink", "media.class": "Audio/Sink", "node.autoconnect": False}}},
+        {"id": 2, "type": "PipeWire:Interface:Node", "info": {"props": {
+            "node.name": "source", "media.class": "Audio/Source", "node.autoconnect": False}}},
+        {"id": 3, "type": "PipeWire:Interface:Node", "info": {"props": {
+            "node.name": "pw-record", "media.class": "Stream/Input/Audio"}}},
+        {"id": 4, "type": "PipeWire:Interface:Node", "info": {"props": {
+            "node.name": "pw-play", "media.class": "Stream/Output/Audio"}}},
+        {"id": 5, "type": "PipeWire:Interface:Link", "info": {
+            "output-node-id": 2, "input-node-id": 3, "state": "active"}},
+        {"id": 6, "type": "PipeWire:Interface:Link", "info": {
+            "output-node-id": 4, "input-node-id": 1, "state": "active"}},
+    ]
+    check = inspect_graph(active_graph, "sink", "source", "active")
+    assert check["passed"] and check["capture_connected"] and check["playback_connected"]
+
+print("pipewire loopback unit: ok")

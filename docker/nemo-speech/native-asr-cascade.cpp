@@ -695,15 +695,23 @@ class Cascade {
         // for the following correction.
         const std::uint64_t requested_start_sample =
             segment->audio_start_ms * kSampleRate / 1000ULL;
-        const std::uint64_t requested_end_sample = std::min<std::uint64_t>(
+        const std::uint64_t event_end_sample = std::min<std::uint64_t>(
             total_samples_, segment->audio_end_ms * kSampleRate / 1000ULL);
         const std::uint64_t available_start_sample =
             std::max(requested_start_sample, audio_buffer_base_sample_);
-        if (requested_end_sample > available_start_sample) {
+        // Very short repeated-word endpoints can have an atypical token shift:
+        // their nominal correction bounds contain only silence even though the
+        // spoken word is already present later in the buffered ingress frontier.
+        // Give Parakeet at least 1.6 seconds of already-received context without
+        // moving canonical event bounds or consuming future buffer ownership.
+        constexpr std::uint64_t kMinimumCorrectionSamples = 1600ULL * kSampleRate / 1000ULL;
+        const std::uint64_t correction_end_sample = std::min<std::uint64_t>(
+            total_samples_, std::max(event_end_sample, available_start_sample + kMinimumCorrectionSamples));
+        if (correction_end_sample > available_start_sample) {
             const std::size_t begin = std::min<std::size_t>(
                 audio_buffer_.size(), available_start_sample - audio_buffer_base_sample_);
             const std::size_t end = std::min<std::size_t>(
-                audio_buffer_.size(), requested_end_sample - audio_buffer_base_sample_);
+                audio_buffer_.size(), correction_end_sample - audio_buffer_base_sample_);
             if (end > begin) {
                 segment->audio.assign(
                     audio_buffer_.begin() + static_cast<std::ptrdiff_t>(begin),

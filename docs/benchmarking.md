@@ -87,6 +87,21 @@ peak RSS, RTF, failures, and event-order validation. Paced runs report partial
 and finalization lag; unpaced AMI runs leave those latency fields null rather
 than subtracting media time from throughput time.
 
+The interactive cascade benchmark has two transports. `file` remains the
+default deterministic regression path. `pipewire-loopback` creates one uniquely
+named mono virtual sink/source pair with autoconnect disabled, starts live
+capture against the exact source only after both models report readiness, and
+plays the fixture to the exact sink. The fixture includes one second of leading
+and trailing boundary silence in addition to inter-utterance silence. PipeWire
+version, node IDs and serials, exact links, physical-device isolation checks,
+playback/capture status, and teardown are recorded in the external summary.
+Captured PCM is streamed directly to the cascade and is never saved.
+
+Loopback release acceptance additionally requires one load per model, no swap
+growth, RTF from 0.98 through 1.10, and complete process/node cleanup. It is
+deliberately excluded from `scripts/check` because it needs the user PipeWire
+session, real weights, the runtime image, and elapsed real time.
+
 The latest engineering, deterministic subset, and initial full-split
 validation, plus the boundary between completed and pending stages, are in
 [`reproducibility-report.md`](reproducibility-report.md).

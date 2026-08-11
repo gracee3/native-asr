@@ -42,8 +42,9 @@ with tempfile.TemporaryDirectory(prefix="native-asr-cascade-benchmark.") as temp
     manifest.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     audio, info = benchmark.fixture("librispeech-test-clean", manifest, rows, 1000)
     assert audio.is_file()
-    assert info["frames"] == 19200
-    assert info["duration_seconds"] == 1.2
+    assert info["frames"] == 51200
+    assert info["duration_seconds"] == 3.2
+    assert info["boundary_silence_ms"] == 1000
     assert info["selection"] == "abs(duration_seconds-3.0),sha256(utterance_id)"
     # A repeated build must reuse the same verified fixture.
     assert benchmark.fixture("librispeech-test-clean", manifest, rows, 1000)[0] == audio
@@ -107,5 +108,32 @@ with tempfile.TemporaryDirectory(prefix="native-asr-cascade-benchmark.") as temp
     assert summary["partial_lag_p95_ms"] == 110
     assert summary["correction_lag_max_ms"] == 200
     assert summary["acceptance_passed"]
+
+    transport_info = {
+        "graph_isolation_checks": [
+            {"passed": True, "physical_or_unknown_links": []} for _ in range(3)
+        ],
+        "playback": {"status": "complete", "returncode": 0},
+        "capture": {"status": "complete", "returncode": 0},
+        "cleanup": {"status": "complete", "virtual_nodes_absent": True},
+    }
+    loopback_summary = benchmark.analyze(
+        events,
+        {"real_time_factor": 1.0, "wall_ms": 1200, "user_seconds": 1.0,
+         "system_seconds": 0.1, "peak_rss_kb": 100, "nemotron_loads": 1,
+         "parakeet_loads": 1},
+        rows, info, True, thermal, 100, 100,
+        "pipewire-loopback", transport_info,
+    )
+    assert loopback_summary["acceptance_passed"]
+    assert loopback_summary["acceptance_gates"]["one_load_per_model"]
+    assert loopback_summary["acceptance_gates"]["physical_device_links_absent"]
+
+    command = benchmark.loopback_capture_command(
+        "exact-virtual-source", root / "audit", 12.5, 880, 320
+    )
+    assert command[1:4] == ["live", "--source", "exact-virtual-source"]
+    assert "--capture-seconds" in command
+    assert "--paced" not in command
 
 print("cascade benchmark unit: ok")

@@ -19,6 +19,7 @@ import time
 import wave
 
 from evaluation import NORMALIZATION_VERSION, errors, normalize
+from pipewire_loopback import PipeWireError, PipeWireLoopback, terminate_owned_process
 
 
 ROOT = Path(os.environ["NATIVE_ASR_REPO_ROOT"])
@@ -73,10 +74,11 @@ def selected_rows(dataset: str, limit: int, selection: str) -> tuple[Path, list[
 
 
 def fixture(
-    dataset: str, manifest: Path, rows: list[dict], silence_ms: int, selection: str = "phrase"
+    dataset: str, manifest: Path, rows: list[dict], silence_ms: int,
+    selection: str = "phrase", boundary_silence_ms: int = 1000,
 ) -> tuple[Path, dict]:
     identity = {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset": dataset,
         "manifest_sha256": digest(manifest),
         "utterance_ids": [row["utterance_id"] for row in rows],
@@ -85,6 +87,7 @@ def fixture(
             else "sha256(utterance_id)"
         ),
         "silence_ms": silence_ms,
+        "boundary_silence_ms": boundary_silence_ms,
         "format": "pcm16le-16000hz-mono",
     }
     fingerprint = hashlib.sha256(
@@ -108,6 +111,9 @@ def fixture(
             output.setsampwidth(2)
             output.setframerate(16000)
             silence = b"\0\0" * (16000 * silence_ms // 1000)
+            boundary_silence = b"\0\0" * (16000 * boundary_silence_ms // 1000)
+            output.writeframesraw(boundary_silence)
+            frames += len(boundary_silence) // 2
             for index, row in enumerate(rows):
                 source = Path(row["prepared_path"])
                 with wave.open(str(source), "rb") as current:
@@ -124,6 +130,8 @@ def fixture(
                 if index + 1 < len(rows):
                     output.writeframesraw(silence)
                     frames += len(silence) // 2
+            output.writeframesraw(boundary_silence)
+            frames += len(boundary_silence) // 2
         os.replace(temporary, audio)
     finally:
         temporary.unlink(missing_ok=True)
@@ -203,9 +211,151 @@ def command_output(command: list[str], fallback: str = "unknown") -> str:
         return fallback
 
 
+class DiagnosticProcess:
+    def __init__(self, command: list[str]) -> None:
+        self.command = command
+        self.process = subprocess.Popen(
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
+        self.ready = threading.Event()
+        self.lines: list[str] = []
+        self.thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self.thread.start()
+
+    def _read_stderr(self) -> None:
+        assert self.process.stderr is not None
+        for line in self.process.stderr:
+            self.lines.append(line)
+            if line.rstrip("\n") == "cascade: ready":
+                self.ready.set()
+
+    def stderr_text(self) -> str:
+        self.thread.join(timeout=2)
+        return "".join(self.lines)
+
+
+def loopback_capture_command(
+    source_name: str, audit: Path, capture_seconds: float,
+    acoustic_shift_ms: int, acoustic_tail_ms: int,
+) -> list[str]:
+    return [
+        str(ROOT / "scripts/cascade"), "live",
+        "--source", source_name,
+        "--capture-seconds", f"{capture_seconds:.3f}",
+        "--jsonl", "--audit", str(audit),
+        "--acoustic-shift-ms", str(acoustic_shift_ms),
+        "--acoustic-tail-ms", str(acoustic_tail_ms),
+    ]
+
+
+def run_file_transport(command: list[str]) -> tuple[int, str, dict]:
+    with tempfile.TemporaryFile("w+", encoding="utf-8") as stderr:
+        completed = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=stderr)
+        stderr.seek(0)
+        stderr_text = stderr.read()
+    return completed.returncode, stderr_text, {
+        "name": "file",
+        "command": command,
+        "capture": {"status": "not-applicable", "returncode": None},
+        "playback": {"status": "not-applicable", "returncode": None},
+    }
+
+
+def run_pipewire_transport(
+    audio: Path, fixture_info: dict, audit: Path, acoustic_shift_ms: int,
+    acoustic_tail_ms: int,
+) -> tuple[int, str, dict]:
+    loopback = PipeWireLoopback(
+        pw_loopback_bin=os.environ.get("PW_LOOPBACK_BIN", "pw-loopback"),
+        pw_play_bin=os.environ.get("PW_PLAY_BIN", "pw-play"),
+        pw_dump_bin=os.environ.get("PW_DUMP_BIN", "pw-dump"),
+    )
+    capture_seconds = float(fixture_info["duration_seconds"]) + 3.0
+    diagnostics: DiagnosticProcess | None = None
+    failure: str | None = None
+    details = {
+        "name": "pipewire-loopback",
+        "pipewire_version": loopback.version(),
+        "virtual_node_names": {
+            "prefix": loopback.prefix,
+            "sink": loopback.sink_name,
+            "source": loopback.source_name,
+        },
+        "virtual_nodes": {},
+        "graph_isolation_checks": loopback.graph_checks,
+        "capture": {
+            "status": "not-started", "returncode": None,
+            "source": loopback.source_name,
+            "seconds": capture_seconds,
+            "ready_seen": False,
+        },
+        "playback": loopback.playback_status,
+        "cleanup": {"status": "pending", "virtual_nodes_absent": False},
+    }
+    try:
+        details["virtual_nodes"] = loopback.start()
+        command = loopback_capture_command(
+            loopback.source_name, audit, capture_seconds,
+            acoustic_shift_ms, acoustic_tail_ms,
+        )
+        details["capture"]["command"] = command
+        diagnostics = DiagnosticProcess(command)
+        ready_deadline = time.monotonic() + 200
+        while not diagnostics.ready.wait(0.05):
+            if diagnostics.process.poll() is not None:
+                raise PipeWireError(
+                    f"cascade exited before readiness with status {diagnostics.process.returncode}"
+                )
+            if time.monotonic() >= ready_deadline:
+                raise PipeWireError("cascade readiness diagnostic timed out")
+        details["capture"].update({"status": "running", "ready_seen": True})
+        loopback.check_graph("capture-active", require_capture=True, timeout=5)
+        loopback.start_playback(audio)
+        details["playback"] = loopback.playback_status
+        loopback.check_graph(
+            "playback-and-capture-active", require_capture=True,
+            require_playback=True, timeout=5,
+        )
+        loopback.wait_playback(float(fixture_info["duration_seconds"]) + 10)
+        details["playback"] = loopback.playback_status
+        loopback.check_graph("post-playback", require_capture=True, timeout=2)
+        try:
+            capture_returncode = diagnostics.process.wait(timeout=capture_seconds + 10)
+        except subprocess.TimeoutExpired as error:
+            raise PipeWireError("bounded live capture did not complete") from error
+        details["capture"].update({
+            "status": "complete" if capture_returncode == 0 else "failed",
+            "returncode": capture_returncode,
+        })
+        if capture_returncode:
+            raise PipeWireError(f"live capture failed with status {capture_returncode}")
+    except (OSError, PipeWireError, subprocess.SubprocessError) as error:
+        failure = str(error)
+    finally:
+        if diagnostics is not None and diagnostics.process.poll() is None:
+            terminate_owned_process(diagnostics.process)
+            details["capture"].update({
+                "status": "terminated",
+                "returncode": diagnostics.process.returncode,
+            })
+        details["cleanup"] = loopback.close()
+        details["graph_isolation_checks"] = loopback.graph_checks
+        details["playback"] = loopback.playback_status
+    stderr_text = diagnostics.stderr_text() if diagnostics is not None else ""
+    if failure:
+        details["failure"] = failure
+        return 1, stderr_text, details
+    if details["cleanup"].get("status") != "complete":
+        details["failure"] = "virtual-node cleanup failed"
+        return 1, stderr_text, details
+    return 0, stderr_text, details
+
+
 def analyze(
     events: list[dict], result: dict, rows: list[dict], fixture_info: dict, paced: bool,
     thermal: ThermalSampler, swap_start: int, swap_end: int,
+    transport: str = "file", transport_info: dict | None = None,
 ) -> dict:
     contiguous = [event.get("sequence") for event in events] == list(range(len(events)))
     nemotron_finals = {
@@ -261,6 +411,7 @@ def analyze(
     degraded = [event for event in commits if event.get("degraded")]
     correction_max = max(correction_lags, default=None)
     partial_p95 = percentile(partial_lags, 0.95)
+    real_time_factor = result.get("real_time_factor")
     nominal_gates = {
         "contiguous_events": contiguous,
         "ordered_commits": commit_order,
@@ -271,12 +422,46 @@ def analyze(
             nemotron_wer is not None and committed_wer is not None and committed_wer <= nemotron_wer
         ),
     }
+    if transport == "pipewire-loopback":
+        transport_info = transport_info or {}
+        graph_checks = transport_info.get("graph_isolation_checks", [])
+        nominal_gates.update({
+            "one_load_per_model": (
+                result.get("nemotron_loads") == 1 and result.get("parakeet_loads") == 1
+            ),
+            "no_swap_growth": swap_end <= swap_start,
+            "real_time_factor_between_0_98_and_1_10": (
+                isinstance(real_time_factor, (int, float))
+                and 0.98 <= real_time_factor <= 1.10
+            ),
+            "physical_device_links_absent": (
+                len(graph_checks) >= 3
+                and all(
+                    check.get("passed")
+                    and not check.get("physical_or_unknown_links")
+                    for check in graph_checks
+                )
+            ),
+            "playback_complete": (
+                transport_info.get("playback", {}).get("status") == "complete"
+                and transport_info.get("playback", {}).get("returncode") == 0
+            ),
+            "capture_complete": (
+                transport_info.get("capture", {}).get("status") == "complete"
+                and transport_info.get("capture", {}).get("returncode") == 0
+            ),
+            "virtual_cleanup_complete": (
+                transport_info.get("cleanup", {}).get("status") == "complete"
+                and transport_info.get("cleanup", {}).get("virtual_nodes_absent") is True
+            ),
+        })
     return {
         "schema_version": 1,
         "status": "complete",
         "dataset": fixture_info["dataset"],
         "utterances": len(rows),
         "paced": paced,
+        "transport": transport,
         "fixture": fixture_info,
         "normalization": NORMALIZATION_VERSION,
         "events": len(events),
@@ -302,7 +487,7 @@ def analyze(
         "correction_lag_p50_ms": percentile(correction_lags, 0.50),
         "correction_lag_p95_ms": percentile(correction_lags, 0.95),
         "correction_lag_max_ms": correction_max,
-        "real_time_factor": result.get("real_time_factor"),
+        "real_time_factor": real_time_factor,
         "wall_ms": result.get("wall_ms"),
         "user_seconds": result.get("user_seconds"),
         "system_seconds": result.get("system_seconds"),
@@ -322,8 +507,13 @@ def analyze(
 def main() -> None:
     parser = argparse.ArgumentParser(prog="scripts/cascade-benchmark")
     parser.add_argument("dataset", choices=("librispeech-test-clean", "librispeech-test-other"))
+    parser.add_argument(
+        "--transport", choices=("file", "pipewire-loopback"), default="file",
+        help="file replays directly (default); pipewire-loopback exercises exact live capture",
+    )
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--silence-ms", type=int, default=1000)
+    parser.add_argument("--boundary-silence-ms", type=int, default=1000)
     parser.add_argument(
         "--selection", choices=("phrase", "hash"), default="phrase",
         help="phrase sorts by distance from three seconds for the interactive acceptance fixture; "
@@ -337,59 +527,60 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if (
-        args.limit <= 0 or args.silence_ms < 1000 or
+        args.limit <= 0 or args.silence_ms < 1000 or args.boundary_silence_ms < 1000 or
         args.acoustic_shift_ms < 0 or args.acoustic_tail_ms < 0
     ):
         parser.error(
-            "--limit must be positive, --silence-ms must be at least 1000, "
+            "--limit must be positive, silence values must be at least 1000, "
             "and acoustic context must be nonnegative"
         )
+    if args.transport == "pipewire-loopback" and not args.paced:
+        parser.error("PipeWire loopback transport is inherently paced; --unpaced is invalid")
 
     manifest, rows = selected_rows(args.dataset, args.limit, args.selection)
     audio, fixture_info = fixture(
-        args.dataset, manifest, rows, args.silence_ms, args.selection
+        args.dataset, manifest, rows, args.silence_ms, args.selection,
+        args.boundary_silence_ms,
     )
     created = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     mode = "paced" if args.paced else "unpaced"
-    base = args.output or BENCHMARKS / "cascade" / f"{created}-{args.dataset}-{args.limit}-{mode}"
+    transport_label = args.transport.replace("pipewire-", "")
+    base = args.output or BENCHMARKS / "cascade" / (
+        f"{created}-{args.dataset}-{args.limit}-{transport_label}-{mode}"
+    )
     base = base.resolve()
     audit = Path(str(base) + ".audit")
     summary_path = Path(str(base) + ".summary.json")
     if audit.exists() or summary_path.exists():
         raise SystemExit(f"error: output already exists for base: {base}")
 
-    command = [
-        str(ROOT / "scripts/cascade"), "file", str(audio),
-        "--paced" if args.paced else "--unpaced", "--jsonl", "--audit", str(audit),
-        "--acoustic-shift-ms", str(args.acoustic_shift_ms),
-        "--acoustic-tail-ms", str(args.acoustic_tail_ms),
-    ]
     base.parent.mkdir(parents=True, exist_ok=True)
     swap_start = swap_used_kb()
-    with tempfile.TemporaryFile("w+", encoding="utf-8") as stderr, ThermalSampler() as thermal:
-        completed = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=stderr)
-        stderr.seek(0)
-        stderr_text = stderr.read()
+    with ThermalSampler() as thermal:
+        if args.transport == "file":
+            command = [
+                str(ROOT / "scripts/cascade"), "file", str(audio),
+                "--paced" if args.paced else "--unpaced", "--jsonl", "--audit", str(audit),
+                "--acoustic-shift-ms", str(args.acoustic_shift_ms),
+                "--acoustic-tail-ms", str(args.acoustic_tail_ms),
+            ]
+            returncode, stderr_text, transport_info = run_file_transport(command)
+        else:
+            returncode, stderr_text, transport_info = run_pipewire_transport(
+                audio, fixture_info, audit, args.acoustic_shift_ms,
+                args.acoustic_tail_ms,
+            )
     swap_end = swap_used_kb()
-    if completed.returncode:
-        raise SystemExit(
-            f"error: cascade replay failed with status {completed.returncode}:\n{stderr_text[-4000:]}"
-        )
 
-    events = [
-        json.loads(line)
-        for line in (audit / "events.jsonl").read_text(encoding="utf-8").splitlines()
-        if line
-    ]
-    result = json.loads((audit / "result.json").read_text(encoding="utf-8"))
-    summary = analyze(events, result, rows, fixture_info, args.paced, thermal, swap_start, swap_end)
-    summary.update({
+    common = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "audit_path": str(audit),
         "summary_path": str(summary_path),
         "git_revision": command_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"]),
         "dirty_tree": bool(command_output(["git", "-C", str(ROOT), "status", "--porcelain"], "")),
-        "image_id": command_output(["docker", "image", "inspect", "asr-nemo-speech", "--format", "{{.Id}}"]),
+        "image_id": command_output(
+            ["docker", "image", "inspect", "asr-nemo-speech", "--format", "{{.Id}}"]
+        ),
         "cpu": command_output(["lscpu", "--parse=MODELNAME"]).splitlines()[-1],
         "logical_cpus": os.cpu_count(),
         "memory_bytes": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"),
@@ -398,7 +589,39 @@ def main() -> None:
         "acoustic_shift_ms": args.acoustic_shift_ms,
         "acoustic_tail_ms": args.acoustic_tail_ms,
         "selection": args.selection,
-    })
+        "transport": args.transport,
+        "transport_details": transport_info,
+    }
+    if returncode:
+        failure_summary = {
+            "schema_version": 1,
+            "status": "failed",
+            "dataset": args.dataset,
+            "utterances": len(rows),
+            "paced": args.paced,
+            "fixture": fixture_info,
+            "failure": transport_info.get("failure", "cascade transport failed"),
+            "stderr_tail": stderr_text[-4000:],
+            "swap_used_start_kb": swap_start,
+            "swap_used_end_kb": swap_end,
+            "thermal_peak_c": max(thermal.peaks.values(), default=None),
+            **common,
+        }
+        atomic_json(summary_path, failure_summary)
+        print(json.dumps(failure_summary, sort_keys=True, indent=2))
+        raise SystemExit(1)
+
+    events = [
+        json.loads(line)
+        for line in (audit / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    result = json.loads((audit / "result.json").read_text(encoding="utf-8"))
+    summary = analyze(
+        events, result, rows, fixture_info, args.paced, thermal, swap_start, swap_end,
+        args.transport, transport_info,
+    )
+    summary.update(common)
     atomic_json(summary_path, summary)
     print(json.dumps(summary, sort_keys=True, indent=2))
     if args.paced and not summary["acceptance_passed"]:

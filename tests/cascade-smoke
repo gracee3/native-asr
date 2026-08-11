@@ -38,9 +38,9 @@ jq -s -e '
   and (all(.[] | select(.state == "committed"); .degraded == false))
 ' "$work/success.jsonl" >/dev/null
 
-# The ingress frontier can lead the final words. Absolute word bounds must
-# select the intended 200 ms correction window and retain buffered future for
-# the next phrase instead of assigning it to the first correction.
+# The ingress frontier can lead the final words. Canonical event bounds retain
+# the shifted word interval, while the correction receives the available part
+# of its 1.6-second minimum context without consuming the next phrase's buffer.
 head -c 81920 "$work/audio.f32" |
   env CASCADE_FAKE_FINAL_EVERY=4 CASCADE_FAKE_WORD_BOUNDS=1 \
     CASCADE_FAKE_SCENARIO=sample_count \
@@ -48,7 +48,7 @@ head -c 81920 "$work/audio.f32" |
     --nemotron fake --parakeet fake \
     --acoustic-shift-ms 40 --acoustic-tail-ms 0 > "$work/word-bounds.jsonl"
 jq -s -e '
-  ([.[] | select(.state == "committed") | .text] == ["2560", "2560"])
+  ([.[] | select(.state == "committed") | .text] == ["8320", "8320"])
   and ([.[] | select(.state == "committed") | [.audio_start_ms, .audio_end_ms]]
        == [[120, 280], [760, 920]])
 ' "$work/word-bounds.jsonl" >/dev/null

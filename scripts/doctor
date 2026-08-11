@@ -95,6 +95,7 @@ fi
 if [[ $profile == all || $profile == streaming ]]; then
   check_tool "$pw_record_bin"
   check_tool "$pw_cli_bin"
+  check_tool timeout
 fi
 
 host_arch=$(uname -m 2>/dev/null || true)

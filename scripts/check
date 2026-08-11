@@ -47,6 +47,7 @@ python3 -m py_compile scripts/lib/*.py
 ./tests/cascade-smoke
 ./tests/cascade-wrapper-smoke
 ./tests/cascade-benchmark-unit
+./tests/pipewire-loopback-unit
 ./tests/usability-smoke
 ./tests/ensemble-unit
 ./tests/ensemble-smoke

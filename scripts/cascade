@@ -8,6 +8,7 @@ source "$repo_root/scripts/lib/paths.sh"
 docker_bin=${DOCKER_BIN:-docker}
 ffmpeg_bin=${FFMPEG_BIN:-ffmpeg}
 pw_record_bin=${PW_RECORD_BIN:-pw-record}
+timeout_bin=${TIMEOUT_BIN:-timeout}
 verify_models_bin=${NATIVE_ASR_VERIFY_MODELS_BIN:-$repo_root/scripts/verify-models}
 image=${NATIVE_ASR_NEMO_IMAGE:-asr-nemo-speech}
 ready_timeout_seconds=${NATIVE_ASR_CASCADE_READY_TIMEOUT_SECONDS:-180}
@@ -32,6 +33,7 @@ Options:
   --acoustic-shift-ms N   token-to-acoustic timing shift (default: 880)
   --acoustic-tail-ms N    terminal acoustic allowance (default: 320)
   --source NODE           selected PipeWire source (live mode only)
+  --capture-seconds N     stop live capture after N seconds (test/acceptance)
   --paced                 replay file at real-time pace (file default)
   --unpaced               decode file without replay pacing
 
@@ -61,6 +63,7 @@ if [[ $mode == file ]]; then
 fi
 
 source_node=''
+capture_seconds=''
 audit=''
 paced=true
 cascade_args=()
@@ -85,6 +88,12 @@ while (($#)); do
       source_node=$2
       shift 2
       ;;
+    --capture-seconds)
+      (($# >= 2)) || die '--capture-seconds requires a value'
+      [[ $mode == live ]] || die '--capture-seconds is valid only in live mode'
+      capture_seconds=$2
+      shift 2
+      ;;
     --paced)
       [[ $mode == file ]] || die '--paced is valid only in file mode'
       paced=true
@@ -105,6 +114,11 @@ done
 
 [[ $ready_timeout_seconds =~ ^[1-9][0-9]*$ ]] || \
   die 'NATIVE_ASR_CASCADE_READY_TIMEOUT_SECONDS must be a positive integer'
+if [[ -n $capture_seconds ]]; then
+  [[ $capture_seconds =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] &&
+    awk -v value="$capture_seconds" 'BEGIN { exit !(value > 0) }' || \
+    die '--capture-seconds must be positive'
+fi
 
 if [[ $mode == file ]]; then
   [[ -r $audio ]] || die "audio input is not readable: $audio"
@@ -145,6 +159,9 @@ docker_args+=("$image" cascade "${cascade_args[@]}")
 
 if [[ $mode == live ]]; then
   command -v "$pw_record_bin" >/dev/null || die "PipeWire recorder not found: $pw_record_bin"
+  if [[ -n $capture_seconds ]]; then
+    command -v "$timeout_bin" >/dev/null || die "timeout command not found: $timeout_bin"
+  fi
 else
   command -v "$ffmpeg_bin" >/dev/null || die "FFmpeg not found: $ffmpeg_bin"
 fi
@@ -217,7 +234,12 @@ done
 if [[ $mode == live ]]; then
   capture_args=(--rate 16000 --channels 1 --channel-map mono --format f32 --latency 160ms)
   [[ -z $source_node ]] || capture_args+=(--target "$source_node")
-  "$pw_record_bin" "${capture_args[@]}" - >&$audio_fd &
+  if [[ -n $capture_seconds ]]; then
+    "$timeout_bin" --signal=INT --kill-after=2 "${capture_seconds}s" \
+      "$pw_record_bin" "${capture_args[@]}" - >&$audio_fd &
+  else
+    "$pw_record_bin" "${capture_args[@]}" - >&$audio_fd &
+  fi
 else
   ffmpeg_args=(-nostdin -hide_banner -loglevel error)
   ffmpeg_args+=(
@@ -235,6 +257,9 @@ wait "$producer_pid" || producer_status=$?
 producer_pid=''
 exec {audio_fd}>&-
 audio_fd=''
+if [[ $mode == live && -n $capture_seconds && $producer_status == 124 ]]; then
+  producer_status=0
+fi
 if ((producer_status != 0)); then
   printf 'cascade: %s failed with status %s\n' \
     "$([[ $mode == live ]] && printf capture || printf conversion)" "$producer_status" >&2

@@ -49,19 +49,34 @@ case ${CASCADE_FAKE_CAPTURE_MODE:-bounded} in
   *) exit 20 ;;
 esac
 EOF
-chmod +x "$work/bin/verify" "$work/bin/docker" "$work/bin/ffmpeg" "$work/bin/pw-record"
+cat > "$work/bin/timeout" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CASCADE_TIMEOUT_LOG"
+while (($#)); do
+  case $1 in
+    --signal=*|--kill-after=*) shift ;;
+    *s) shift; break ;;
+    *) exit 21 ;;
+  esac
+done
+"$@"
+EOF
+chmod +x "$work/bin/verify" "$work/bin/docker" "$work/bin/ffmpeg" \
+  "$work/bin/pw-record" "$work/bin/timeout"
 
 export NATIVE_ASR_MODELS=$work/models
 export NATIVE_ASR_VERIFY_MODELS_BIN=$work/bin/verify
 export DOCKER_BIN=$work/bin/docker
 export FFMPEG_BIN=$work/bin/ffmpeg
 export PW_RECORD_BIN=$work/bin/pw-record
+export TIMEOUT_BIN=$work/bin/timeout
 export TMPDIR=$work/tmp
 export CASCADE_VERIFY_LOG=$work/verify.log
 export CASCADE_DOCKER_LOG=$work/docker.log
 export CASCADE_DOCKER_PID_LOG=$work/docker.pid
 export CASCADE_FFMPEG_LOG=$work/ffmpeg.log
 export CASCADE_PW_LOG=$work/pw.log
+export CASCADE_TIMEOUT_LOG=$work/timeout.log
 export CASCADE_CAPTURE_PID_LOG=$work/capture.pid
 export CASCADE_ORDER_LOG=$work/order.log
 
@@ -102,8 +117,9 @@ grep -Fqx 'test-source' "$work/pw.log"
 
 : > "$work/order.log"
 CASCADE_FAKE_CAPTURE_MODE=bounded \
-  "$repo_root/scripts/cascade" live --source finite-source --jsonl
+  "$repo_root/scripts/cascade" live --source finite-source --capture-seconds 4.5 --jsonl
 [[ $(sed -n '3p' "$work/order.log") == capture-start ]]
+grep -Fqx '4.5s' "$work/timeout.log"
 ! kill -0 "$(< "$work/docker.pid")" 2>/dev/null
 
 if CASCADE_FAKE_DOCKER_MODE=never-ready \
