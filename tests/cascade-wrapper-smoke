@@ -20,7 +20,29 @@ case ${CASCADE_FAKE_DOCKER_MODE:-ready} in
   ready)
     printf '%s\n' 'docker-ready' >> "$CASCADE_ORDER_LOG"
     printf '%s\n' 'cascade: ready' >&2
-    exec cat >/dev/null
+    cat >/dev/null
+    if [[ ${CASCADE_FAKE_DOCKER_FLUSH:-false} == true ]]; then
+      printf '%s\n' \
+        '{"sequence":0,"session_id":"fake","track_id":"interactive","segment_id":0,"revision":0,"state":"model_final","model":"nemo:nemotron-streaming-en","text":"final phrase"}' \
+        '{"sequence":1,"session_id":"fake","track_id":"interactive","segment_id":0,"revision":1,"state":"model_final","model":"nemo:parakeet-tdt-v3","text":"corrected phrase"}' \
+        '{"sequence":2,"session_id":"fake","track_id":"interactive","segment_id":0,"revision":1,"state":"committed","model":"nemo:parakeet-tdt-v3","text":"corrected phrase"}'
+      audit_parent=''
+      audit_name=''
+      previous=''
+      for argument in "$@"; do
+        if [[ $argument == type=bind,src=*,dst=/audit ]]; then
+          audit_parent=${argument#type=bind,src=}
+          audit_parent=${audit_parent%,dst=/audit}
+        elif [[ $previous == --audit && $argument == /audit/* ]]; then
+          audit_name=${argument#/audit/}
+        fi
+        previous=$argument
+      done
+      if [[ -n $audit_parent && -n $audit_name ]]; then
+        mkdir -- "$audit_parent/$audit_name"
+        : > "$audit_parent/$audit_name/events.jsonl"
+      fi
+    fi
     ;;
   never-ready)
     exec sleep 30
@@ -45,7 +67,26 @@ printf '%s\n' 'capture-start' >> "$CASCADE_ORDER_LOG"
 case ${CASCADE_FAKE_CAPTURE_MODE:-bounded} in
   bounded) dd if=/dev/zero bs=10240 count=1 status=none ;;
   failure) exit 19 ;;
-  blocking) exec sleep 30 ;;
+  blocking)
+    exec python3 -c '
+import signal
+import sys
+import time
+signal.signal(signal.SIGINT, lambda _signum, _frame: sys.exit(0))
+while True:
+    time.sleep(1)
+'
+    ;;
+  stubborn)
+    exec python3 -c '
+import signal
+import time
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(1)
+'
+    ;;
   *) exit 20 ;;
 esac
 EOF
@@ -83,6 +124,13 @@ export CASCADE_ORDER_LOG=$work/order.log
 "$repo_root/scripts/cascade" --help > "$work/help.stdout"
 grep -Fq 'scripts/cascade live' "$work/help.stdout"
 "$repo_root/scripts/cascade" -h >/dev/null
+
+if "$repo_root/scripts/cascade" file "$work/audio.wav" --control-stdin \
+    > "$work/control-file.stdout" 2> "$work/control-file.stderr"; then
+  printf '%s\n' 'expected --control-stdin to be rejected in file mode' >&2
+  exit 1
+fi
+grep -Fq -- '--control-stdin is valid only in live mode' "$work/control-file.stderr"
 
 "$repo_root/scripts/cascade" file "$work/audio.wav" --jsonl --audit "$work/file.audit"
 grep -Fqx 'nemo:nemotron-streaming-en' "$work/verify.log"
@@ -122,6 +170,48 @@ CASCADE_FAKE_CAPTURE_MODE=bounded \
 grep -Fqx '4.5s' "$work/timeout.log"
 ! kill -0 "$(< "$work/docker.pid")" 2>/dev/null
 
+# EOF before readiness exits successfully without activating capture or
+# publishing an audit.
+: > "$work/order.log"
+rm -f -- "$work/pw.log"
+CASCADE_FAKE_DOCKER_MODE=never-ready \
+  "$repo_root/scripts/cascade" live --control-stdin --jsonl \
+    --audit "$work/pre-ready.audit" < /dev/null \
+    > "$work/pre-ready.stdout" 2> "$work/pre-ready.stderr"
+[[ ! -e $work/pw.log ]]
+[[ ! -e $work/pre-ready.audit ]]
+[[ ! -s $work/pre-ready.stdout ]]
+! kill -0 "$(< "$work/docker.pid")" 2>/dev/null
+
+# EOF during capture interrupts the recorder, closes the audio FIFO, and lets
+# the runtime flush its final correction and publish an opt-in audit.
+: > "$work/order.log"
+bash -c '
+    while ! grep -Fq capture-start "$1" 2>/dev/null; do sleep 0.01; done
+  ' _ "$work/order.log" |
+  CASCADE_FAKE_DOCKER_FLUSH=true CASCADE_FAKE_CAPTURE_MODE=blocking \
+  "$repo_root/scripts/cascade" live --source controlled-source \
+    --control-stdin --jsonl --audit "$work/graceful.audit" \
+    > "$work/graceful.stdout" 2> "$work/graceful.stderr"
+jq -s -e '
+  [.[].state] == ["model_final", "model_final", "committed"]
+  and .[-1].text == "corrected phrase"
+' "$work/graceful.stdout" >/dev/null
+[[ -e $work/graceful.audit/events.jsonl ]]
+grep -Fqx 'cascade: ready' "$work/graceful.stderr"
+! kill -0 "$(< "$work/docker.pid")" 2>/dev/null
+! kill -0 "$(< "$work/capture.pid")" 2>/dev/null
+
+# Graceful stop remains non-persistent when no audit was requested.
+: > "$work/order.log"
+bash -c '
+    while ! grep -Fq capture-start "$1" 2>/dev/null; do sleep 0.01; done
+  ' _ "$work/order.log" |
+  CASCADE_FAKE_DOCKER_FLUSH=true CASCADE_FAKE_CAPTURE_MODE=blocking \
+  "$repo_root/scripts/cascade" live --source no-audit-source \
+    --control-stdin --jsonl > "$work/no-audit.stdout" 2> "$work/no-audit.stderr"
+jq -e 'select(.state == "committed")' "$work/no-audit.stdout" >/dev/null
+
 if CASCADE_FAKE_DOCKER_MODE=never-ready \
     NATIVE_ASR_CASCADE_READY_TIMEOUT_SECONDS=1 \
     "$repo_root/scripts/cascade" file "$work/audio.wav" --jsonl \
@@ -150,8 +240,9 @@ grep -Fq 'audit destination already exists' "$work/overwrite.stderr"
 
 : > "$work/order.log"
 set +e
-CASCADE_FAKE_CAPTURE_MODE=blocking \
+CASCADE_FAKE_DOCKER_FLUSH=true CASCADE_FAKE_CAPTURE_MODE=blocking \
   "$repo_root/scripts/cascade" live --source blocking-source --jsonl \
+    --audit "$work/cancelled.audit" \
   > "$work/cancel.stdout" 2> "$work/cancel.stderr" &
 wrapper_pid=$!
 for _ in $(seq 1 100); do
@@ -164,6 +255,27 @@ cancel_status=$?
 set -e
 [[ $cancel_status == 130 ]]
 grep -Fq 'cascade: cancelled' "$work/cancel.stderr"
+[[ ! -e $work/cancelled.audit ]]
+! kill -0 "$(< "$work/docker.pid")" 2>/dev/null
+! kill -0 "$(< "$work/capture.pid")" 2>/dev/null
+
+# Hard cancellation escalates when a recorder ignores TERM and still leaves no
+# child or runtime directory behind.
+: > "$work/order.log"
+set +e
+CASCADE_FAKE_CAPTURE_MODE=stubborn \
+  "$repo_root/scripts/cascade" live --source stubborn-source --jsonl \
+  > "$work/stubborn.stdout" 2> "$work/stubborn.stderr" &
+wrapper_pid=$!
+for _ in $(seq 1 100); do
+  grep -Fq 'capture-start' "$work/order.log" && break
+  sleep 0.02
+done
+kill -TERM "$wrapper_pid"
+wait "$wrapper_pid"
+stubborn_status=$?
+set -e
+[[ $stubborn_status == 130 ]]
 ! kill -0 "$(< "$work/docker.pid")" 2>/dev/null
 ! kill -0 "$(< "$work/capture.pid")" 2>/dev/null
 

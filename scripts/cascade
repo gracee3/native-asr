@@ -21,7 +21,7 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/cascade live [--source PIPEWIRE_NODE] [OPTIONS]
+  scripts/cascade live [--source PIPEWIRE_NODE] [--control-stdin] [OPTIONS]
   scripts/cascade file AUDIO [--paced|--unpaced] [OPTIONS]
 
 Options:
@@ -33,6 +33,8 @@ Options:
   --acoustic-shift-ms N   token-to-acoustic timing shift (default: 880)
   --acoustic-tail-ms N    terminal acoustic allowance (default: 320)
   --source NODE           selected PipeWire source (live mode only)
+  --control-stdin         stop gracefully when standard input reaches EOF
+                          (live mode only)
   --capture-seconds N     stop live capture after N seconds (test/acceptance)
   --paced                 replay file at real-time pace (file default)
   --unpaced               decode file without replay pacing
@@ -64,6 +66,7 @@ fi
 
 source_node=''
 capture_seconds=''
+control_stdin=false
 audit=''
 paced=true
 cascade_args=()
@@ -93,6 +96,11 @@ while (($#)); do
       [[ $mode == live ]] || die '--capture-seconds is valid only in live mode'
       capture_seconds=$2
       shift 2
+      ;;
+    --control-stdin)
+      [[ $mode == live ]] || die '--control-stdin is valid only in live mode'
+      control_stdin=true
+      shift
       ;;
     --paced)
       [[ $mode == file ]] || die '--paced is valid only in file mode'
@@ -169,24 +177,41 @@ fi
 runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/native-asr-cascade.XXXXXX")
 audio_fifo=$runtime_dir/audio.fifo
 ready_marker=$runtime_dir/ready
+control_marker=$runtime_dir/control-eof
 mkfifo -- "$audio_fifo"
 docker_pid=''
 producer_pid=''
+control_pid=''
 audio_fd=''
+graceful_requested=false
+
+terminate_child() {
+  local pid=$1 signal=${2:-TERM} attempts=0
+  kill -"$signal" "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null && ((attempts < 60)); do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
 
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
+  if [[ -n $control_pid ]] && kill -0 "$control_pid" 2>/dev/null; then
+    terminate_child "$control_pid"
+  fi
   if [[ -n $producer_pid ]] && kill -0 "$producer_pid" 2>/dev/null; then
-    kill -TERM "$producer_pid" 2>/dev/null || true
-    wait "$producer_pid" 2>/dev/null || true
+    terminate_child "$producer_pid"
+  fi
+  if [[ -n $docker_pid ]] && kill -0 "$docker_pid" 2>/dev/null; then
+    terminate_child "$docker_pid"
   fi
   if [[ -n $audio_fd ]]; then
     exec {audio_fd}>&-
-  fi
-  if [[ -n $docker_pid ]] && kill -0 "$docker_pid" 2>/dev/null; then
-    kill -TERM "$docker_pid" 2>/dev/null || true
-    wait "$docker_pid" 2>/dev/null || true
   fi
   rm -rf -- "$runtime_dir"
   exit "$status"
@@ -216,8 +241,22 @@ docker_pid=$!
 # retaining an empty input stream during model startup.
 exec {audio_fd}> "$audio_fifo"
 
+if [[ $control_stdin == true ]]; then
+  exec {control_fd}<&0
+  (
+    trap - INT TERM
+    while IFS= read -r _; do :; done
+    : > "$control_marker"
+  ) <&$control_fd &
+  control_pid=$!
+  exec {control_fd}<&-
+fi
+
 ready_deadline=$((SECONDS + ready_timeout_seconds))
 while [[ ! -e $ready_marker ]]; do
+  if [[ -e $control_marker ]]; then
+    exit 0
+  fi
   if ! kill -0 "$docker_pid" 2>/dev/null; then
     wait "$docker_pid" 2>/dev/null || true
     docker_pid=''
@@ -230,6 +269,10 @@ while [[ ! -e $ready_marker ]]; do
   fi
   sleep 0.05
 done
+
+if [[ -e $control_marker ]]; then
+  exit 0
+fi
 
 if [[ $mode == live ]]; then
   capture_args=(--rate 16000 --channels 1 --channel-map mono --format f32 --latency 160ms)
@@ -253,11 +296,22 @@ fi
 producer_pid=$!
 
 producer_status=0
+while kill -0 "$producer_pid" 2>/dev/null; do
+  if [[ $control_stdin == true && -e $control_marker &&
+        $graceful_requested == false ]]; then
+    graceful_requested=true
+    kill -INT "$producer_pid" 2>/dev/null || true
+  fi
+  sleep 0.05
+done
 wait "$producer_pid" || producer_status=$?
 producer_pid=''
 exec {audio_fd}>&-
 audio_fd=''
 if [[ $mode == live && -n $capture_seconds && $producer_status == 124 ]]; then
+  producer_status=0
+fi
+if [[ $graceful_requested == true ]]; then
   producer_status=0
 fi
 if ((producer_status != 0)); then
