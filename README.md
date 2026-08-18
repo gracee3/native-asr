@@ -1,5 +1,7 @@
 # native-asr
 
+**Status:** Released (`v0.1.0`) and actively maintained. The Rust streaming TUI described below is post-release work and remains unreleased until the next tag.
+
 Offline, CPU-only speech recognition for long recordings and live English
 transcription. `native-asr` provides two complete workflows on ordinary x86-64
 Linux hardware:
